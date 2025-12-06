@@ -85,10 +85,14 @@ def classify_intent_node(state: Dict[str, Any]) -> Dict[str, Any]:
         else:
             intent = str(result).strip().lower()
 
-        # Map intent based on status
+        # Map intent based on status and message content
+        message_lower = message.lower()
         if status == "onboarding":
             intent = "onboarding"
-        elif "yes" in message.lower() or "no" in message.lower():
+        elif "find" in message_lower and ("match" in message_lower or "someone" in message_lower):
+            # Explicit routing for match requests - route to matching node
+            intent = "match_decision"
+        elif "yes" in message_lower or "no" in message_lower:
             if state.get("active_match"):
                 intent = "match_decision"
 

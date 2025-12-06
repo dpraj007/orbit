@@ -1,5 +1,6 @@
 """Test configuration loading."""
 import pytest
+from unittest.mock import patch
 from src.config import Config
 
 
@@ -18,9 +19,22 @@ def set_required_env(monkeypatch):
 class TestConfig:
     def test_config_requires_kafka_vars(self, monkeypatch):
         """Config should fail if required Kafka vars are missing."""
-        monkeypatch.delenv("KAFKA_BOOTSTRAP_SERVERS", raising=False)
-        with pytest.raises(RuntimeError, match="Missing required env var"):
-            Config.from_env()
+        # Clear all Kafka env vars to ensure test works even with .env file
+        kafka_vars = [
+            "KAFKA_BOOTSTRAP_SERVERS",
+            "KAFKA_TOPIC",
+            "KAFKA_CONSUMER_GROUP",
+            "KAFKA_CLIENT_ID",
+            "KAFKA_SASL_USERNAME",
+            "KAFKA_SASL_PASSWORD",
+        ]
+        for var in kafka_vars:
+            monkeypatch.delenv(var, raising=False)
+        
+        # Prevent .env file from loading
+        with patch('src.config.load_dotenv', lambda *args, **kwargs: None):
+            with pytest.raises(RuntimeError, match="Missing required env var"):
+                Config.from_env()
 
     def test_config_defaults(self, monkeypatch, set_required_env):
         """Config should use sensible defaults."""

@@ -2,6 +2,9 @@
 import pytest
 
 from src.agent.nodes import matching
+from src.utils import llm as llm_utils
+from src.utils.llm import reset_llm
+import src.agent.nodes.matching as matching_module
 
 
 @pytest.mark.unit
@@ -24,11 +27,8 @@ class TestLLMFailures:
 
                 return Response(self.content)
 
-        # Patch all LLM entrypoints used in this flow
-        import src.agent.router as router
-
-        monkeypatch.setattr(matching, "get_llm", lambda: FailingLLM())
-        monkeypatch.setattr(router, "get_llm", lambda: SimpleLLM("onboarding"))
+        # Patch LLM at the source (utils.llm.get_llm)
+        monkeypatch.setattr(llm_utils, "get_llm", lambda: SimpleLLM("onboarding"))
 
         result = runner.run_event(event_fx(text="find me a match"))
 
@@ -45,12 +45,17 @@ class TestLLMFailures:
 
                 return Response()
 
-        monkeypatch.setattr(matching, "get_llm", lambda: BadLLM())
+        # Reset LLM cache and patch get_llm to return our BadLLM
+        reset_llm()
+        bad_llm = BadLLM()
+        monkeypatch.setattr(llm_utils, "get_llm", lambda *args, **kwargs: bad_llm)
+        # Also patch where it's imported in matching module
+        monkeypatch.setattr(matching_module, "get_llm", lambda *args, **kwargs: bad_llm)
 
         profile_a = {"profile_summary": "A", "looking_for_summary": "B"}
         profile_b = {"profile_summary": "C", "looking_for_summary": "D"}
 
         score, reason = matching.calculate_bilateral_score(profile_a, profile_b)
 
-        assert score == 50.0
+        assert score == 50.0, f"Expected 50.0 but got {score}. Reason: {reason}"
         assert "Unable to calculate" in reason
