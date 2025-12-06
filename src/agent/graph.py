@@ -4,6 +4,7 @@ PROPER IMPLEMENTATION using LangChain-LangGraph patterns:
 - Uses START constant for entry point (not set_entry_point)
 - Uses proper message types for LLM communication
 - Graph nodes return messages that accumulate via add_messages reducer
+- Uses LLM to generate dynamic, contextual responses instead of hardcoded strings
 """
 import logging
 import time
@@ -14,27 +15,70 @@ from langchain_core.messages import AIMessage, HumanMessage
 
 from ..api import SeriesAPI
 from ..db import Database
+from ..prompts import GENERAL_RESPONSE_PROMPT
+from ..utils.llm import get_llm
 from .nodes import matching_node, mentor_node, onboarding_node
 from .router import classify_intent_node, load_context_node, route_to_node
 from .state import DatingState
+
+
+def generate_general_response(
+    status: str, profile_summary: str, context: str, message: str
+) -> str:
+    """Generate a dynamic general response using LLM."""
+    log = logging.getLogger("orbit.agent.general")
+    llm = get_llm()
+
+    prompt = GENERAL_RESPONSE_PROMPT.format(
+        status=status or "unknown",
+        profile_summary=profile_summary or "new user",
+        context=context or "general conversation",
+        message=message or "",
+    )
+
+    try:
+        result = llm.invoke(prompt)
+        response = result.content if hasattr(result, "content") else str(result)
+        return response.strip()
+    except Exception as exc:
+        log.error("Failed to generate general response: %s", exc)
+        # Minimal fallback
+        if status == "active":
+            return "Ready to find a match? Just say yes!"
+        elif status == "onboarding":
+            return "Let's continue getting to know you!"
+        return "I'm here to help with dating! What would you like to do?"
 
 
 def general_node(state: Dict[str, Any], db: Any) -> Dict[str, Any]:
     """Handle general/fallback messages.
     
     PROPER: Returns AIMessage for response (will be added to messages via add_messages).
+    Uses LLM to generate dynamic, contextual responses.
     """
     log = logging.getLogger("orbit.agent.general")
 
     user = state.get("user", {})
+    profile = state.get("profile", {})
+    conv_state = state.get("conversation_state", {})
     status = user.get("status", "onboarding") if user else "onboarding"
+    
+    # Extract message from state
+    message = ""
+    messages = state.get("messages", [])
+    if messages:
+        for msg in reversed(messages):
+            if isinstance(msg, HumanMessage):
+                message = msg.content
+                break
+    if not message:
+        message = state.get("message", "")
 
-    if status == "active":
-        response = "Want me to find you a match? Just say yes!"
-    elif status == "onboarding":
-        response = "Let's finish getting to know you first!"
-    else:
-        response = "I'm here to help with dating! Say 'find match' to start or 'help' for advice."
+    profile_summary = profile.get("profile_summary", "") if profile else ""
+    context = conv_state.get("current_node", "general") if conv_state else "general"
+
+    # Generate dynamic response using LLM
+    response = generate_general_response(status, profile_summary, context, message)
 
     # PROPER: Return both messages (for new pattern) and response (for legacy)
     return {"messages": [AIMessage(content=response)], "response": response, "next_node": "save_and_respond"}

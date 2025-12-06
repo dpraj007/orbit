@@ -3,6 +3,7 @@
 PROPER IMPLEMENTATION using LangChain-LangGraph patterns:
 - Extracts message from proper HumanMessage types
 - Returns AIMessage for response (will be added to messages via add_messages)
+- Uses LLM to generate dynamic, contextual responses instead of hardcoded fallbacks
 """
 import logging
 from typing import Any, Dict
@@ -12,11 +13,29 @@ from langchain_core.messages import AIMessage, HumanMessage
 from ...prompts import (
     CONVERSATION_CONTINUATION_PROMPT,
     ICEBREAKER_PROMPT,
+    MENTOR_INTRO_PROMPT,
+    NEEDS_ONBOARDING_PROMPT,
     POST_DATE_DEBRIEF_PROMPT,
     PRE_DATE_PREP_PROMPT,
     RECOVERY_PROMPT,
 )
 from ...utils.llm import get_llm
+
+
+def generate_dynamic_response(prompt_template: str, **kwargs) -> str:
+    """Generate a dynamic response using LLM with the given prompt template."""
+    log = logging.getLogger("orbit.agent.mentor")
+    llm = get_llm()
+
+    prompt = prompt_template.format(**kwargs)
+
+    try:
+        result = llm.invoke(prompt)
+        response = result.content if hasattr(result, "content") else str(result)
+        return response.strip()
+    except Exception as exc:
+        log.error("Failed to generate dynamic response: %s", exc)
+        return None
 
 
 def detect_mentor_mode(message: str) -> str:
@@ -59,7 +78,17 @@ def generate_icebreakers(
         return result.content if hasattr(result, "content") else str(result)
     except Exception as exc:
         logging.getLogger("orbit.agent.mentor").error("Icebreaker generation failed: %s", exc)
-        return "Here are some conversation starters:\n1. Ask about their interests\n2. Share something about yourself\n3. Find common ground"
+        # Dynamic fallback using LLM
+        return generate_dynamic_response(
+            """You are Orbit. Generate 3 creative conversation starters.
+            
+User style: {user_style}
+Match interests: {match_interests}
+
+Create openers that feel natural and spark dialogue. Return as a numbered list.""",
+            user_style=user_style,
+            match_interests=match_profile.get("profile_summary", "various interests"),
+        ) or "Try asking about something they mentioned in their profile, or share something interesting about yourself!"
 
 
 def provide_conversation_help(
@@ -79,7 +108,15 @@ def provide_conversation_help(
         return result.content if hasattr(result, "content") else str(result)
     except Exception as exc:
         logging.getLogger("orbit.agent.mentor").error("Conversation help failed: %s", exc)
-        return "Focus on topics they seem engaged with, ask open-ended questions, and share your own experiences too."
+        return generate_dynamic_response(
+            """You are Orbit helping with dating conversation advice.
+
+The user needs help continuing a conversation with their match.
+Their message: {message}
+
+Give brief, actionable conversation tips. 2-3 sentences max.""",
+            message=recent_conversation,
+        ) or "Ask open-ended questions about what they're into, and share your own experiences too!"
 
 
 def provide_pre_date_prep(
@@ -99,7 +136,14 @@ def provide_pre_date_prep(
         return result.content if hasattr(result, "content") else str(result)
     except Exception as exc:
         logging.getLogger("orbit.agent.mentor").error("Pre-date prep failed: %s", exc)
-        return "Be yourself, ask questions, listen actively, and enjoy getting to know them. You've got this!"
+        return generate_dynamic_response(
+            """You are Orbit giving pre-date advice.
+
+User's situation: {context}
+
+Give warm, encouraging prep advice like a supportive friend. 2-3 sentences max.""",
+            context=date_context,
+        ) or "Be yourself, ask questions, and enjoy getting to know them. You've got this!"
 
 
 def provide_post_date_debrief(
@@ -119,7 +163,14 @@ def provide_post_date_debrief(
         return result.content if hasattr(result, "content") else str(result)
     except Exception as exc:
         logging.getLogger("orbit.agent.mentor").error("Post-date debrief failed: %s", exc)
-        return "Thanks for sharing! How are you feeling about it? What stood out to you?"
+        return generate_dynamic_response(
+            """You are Orbit helping someone process a date experience.
+
+What they shared: {reflection}
+
+Respond as a supportive friend - ask how they're feeling and offer perspective. 2-3 sentences.""",
+            reflection=reflection,
+        ) or "How are you feeling about it? Tell me more about what happened!"
 
 
 def provide_recovery_support(user_profile: Dict[str, Any], situation: str) -> str:
@@ -135,18 +186,26 @@ def provide_recovery_support(user_profile: Dict[str, Any], situation: str) -> st
         return result.content if hasattr(result, "content") else str(result)
     except Exception as exc:
         logging.getLogger("orbit.agent.mentor").error("Recovery support failed: %s", exc)
-        return "That's tough, and it's okay to feel disappointed. Remember, it's not a reflection of your worth. Want to talk about it or look for new matches?"
+        return generate_dynamic_response(
+            """You are Orbit offering emotional support.
+
+User's situation: {situation}
+
+Validate their feelings and offer perspective. Be warm and genuine. 2-3 sentences.""",
+            situation=situation,
+        ) or "That's tough, and your feelings are valid. It's not a reflection of your worth. Want to talk about it?"
 
 
 def mentor_node(state: Dict[str, Any], db: Any) -> Dict[str, Any]:
     """Handle mentor guidance requests.
     
     PROPER: Extracts message from messages list (HumanMessage types)
-    and returns AIMessage for response.
+    and returns AIMessage for response. Uses LLM for dynamic responses.
     """
     log = logging.getLogger("orbit.agent.mentor")
 
     user_id = state.get("user_id")
+    user = state.get("user", {})
     profile = state.get("profile", {})
     conv_state = state.get("conversation_state", {})
     
@@ -161,8 +220,16 @@ def mentor_node(state: Dict[str, Any], db: Any) -> Dict[str, Any]:
     if not message:
         message = state.get("message", "")
 
+    user_name = user.get("name", "") if user else ""
+    profile_summary = profile.get("profile_summary", "") if profile else ""
+
     if not user_id or not profile:
-        resp = "I need to get to know you better first before I can help!"
+        resp = generate_dynamic_response(
+            NEEDS_ONBOARDING_PROMPT,
+            user_name=user_name or "friend",
+            action="get dating advice",
+            completeness="incomplete",
+        ) or "I need to know you a bit better first to give good advice! Let's finish your profile."
         return {"messages": [AIMessage(content=resp)], "response": resp}
 
     # Detect mentor mode
@@ -187,19 +254,34 @@ def mentor_node(state: Dict[str, Any], db: Any) -> Dict[str, Any]:
     # Generate response based on mode
     if mode == "icebreaker":
         if not match_profile:
-            response = "I need to know who you're matched with to help with icebreakers. Do you have an active match?"
+            response = generate_dynamic_response(
+                MENTOR_INTRO_PROMPT,
+                user_name=user_name,
+                user_profile=profile_summary,
+                message=message,
+                has_match="no",
+            ) or "I can help with conversation starters! Tell me about who you're trying to message."
         else:
             response = generate_icebreakers(profile, match_profile)
 
     elif mode == "pre_date":
         if not match_profile:
-            response = "Tell me about your upcoming date! Who is it with and where are you going?"
+            response = generate_dynamic_response(
+                """You are Orbit. A user wants pre-date advice but you don't know who they're meeting.
+
+User name: {user_name}
+Their message: {message}
+
+Ask about the upcoming date to give personalized advice. Be warm and helpful. 1-2 sentences.""",
+                user_name=user_name,
+                message=message,
+            ) or "Tell me about your upcoming date! Where are you going and what do you know about them?"
         else:
             response = provide_pre_date_prep(profile, match_profile, message)
 
     elif mode == "post_date":
         if not match_profile:
-            match_profile = {"profile_summary": "your recent date"}
+            match_profile = {"profile_summary": "their recent date"}
         response = provide_post_date_debrief(profile, match_profile, message)
 
     elif mode == "recovery":
@@ -207,7 +289,13 @@ def mentor_node(state: Dict[str, Any], db: Any) -> Dict[str, Any]:
 
     else:  # continuation
         if not match_profile:
-            response = "I can help with conversation tips! Tell me more about who you're talking to and what you've discussed so far."
+            response = generate_dynamic_response(
+                MENTOR_INTRO_PROMPT,
+                user_name=user_name,
+                user_profile=profile_summary,
+                message=message,
+                has_match="no",
+            ) or "I'd love to help! Tell me more about the conversation and who you're talking to."
         else:
             response = provide_conversation_help(profile, match_profile, message)
 

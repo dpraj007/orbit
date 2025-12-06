@@ -1,7 +1,7 @@
 """Series iMessage REST API client."""
 import logging
 import time
-from typing import Any, Dict, Iterable, Optional
+from typing import Any, Dict, Iterable, Optional, Tuple
 
 import httpx
 
@@ -32,7 +32,10 @@ class SeriesAPI:
     def _request(
         self, method: str, path: str, json: Optional[dict] = None, params: Optional[dict] = None
     ) -> Dict[str, Any]:
-        """Make HTTP request with retry logic."""
+        """Make HTTP request with retry logic.
+        
+        Note: 404 errors are not retried as they indicate the resource doesn't exist.
+        """
         url = f"{self.base_url}{path}"
         headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
         last_exc: Optional[Exception] = None
@@ -44,6 +47,22 @@ class SeriesAPI:
                 )
                 resp.raise_for_status()
                 return resp.json() if resp.content else {}
+            except httpx.HTTPStatusError as exc:
+                # Don't retry 404 errors - resource doesn't exist
+                if exc.response.status_code == 404:
+                    self.log.debug("Resource not found (404) for %s %s", method, path)
+                    raise  # Re-raise immediately without retrying
+                # For other HTTP errors, retry
+                last_exc = exc
+                delay = backoff(attempt)
+                self.log.warning(
+                    "API request failed (%s %s): %s, retrying in %.2fs",
+                    method,
+                    path,
+                    exc,
+                    delay,
+                )
+                time.sleep(delay)
             except Exception as exc:
                 last_exc = exc
                 delay = backoff(attempt)
@@ -118,20 +137,35 @@ class SeriesAPI:
         except Exception as exc:
             self.log.warning("Failed to stop typing indicator: %s", exc)
 
-    def get_messages(self, chat_id: int, limit: int = 50) -> list:
+    def get_messages(self, chat_id: int, limit: int = 50) -> Tuple[list, bool]:
         """Get recent messages from a chat.
         
         Note: The Series API pagination is broken, so we fetch what we can
         from the list endpoint and use scan_for_new_messages() to find newer ones.
+        
+        Returns:
+            tuple: (messages list, was_404 bool) - was_404 is True if chat doesn't exist
         """
-        resp = self._request(
-            "GET", 
-            f"/api/chats/{chat_id}/chat_messages", 
-            params={"per_page": 25}
-        )
-        msgs = resp.get("data") or resp.get("messages") or []
-        msgs.sort(key=lambda m: m.get("id", 0))
-        return msgs[-limit:] if limit else msgs
+        try:
+            resp = self._request(
+                "GET", 
+                f"/api/chats/{chat_id}/chat_messages", 
+                params={"per_page": 25}
+            )
+            msgs = resp.get("data") or resp.get("messages") or []
+            msgs.sort(key=lambda m: m.get("id", 0))
+            return (msgs[-limit:] if limit else msgs, False)
+        except httpx.HTTPStatusError as exc:
+            # Handle 404 gracefully - chat might not exist yet
+            if exc.response.status_code == 404:
+                self.log.debug("Chat %d not found (404), returning empty message list", chat_id)
+                return ([], True)
+            # Re-raise other HTTP errors
+            raise
+        except Exception as exc:
+            # Log other errors but don't crash
+            self.log.warning("Failed to get messages for chat %d: %s", chat_id, exc)
+            return ([], False)
 
     def get_message_by_id(self, chat_id: int, message_id: int) -> dict | None:
         """Fetch a single message by ID."""

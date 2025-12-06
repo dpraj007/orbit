@@ -159,6 +159,7 @@ def main() -> None:
         if cfg.ingress_mode == "api":
             log.info("Ingress mode=api (REST polling). Kafka disabled.")
             last_ids: Dict[int, int] = {}
+            invalid_chats: set[int] = set()  # Track chats that return 404
             sender_number = cfg.series_sender_number
             while should_run:
                 users = db.users.get_all()
@@ -166,25 +167,39 @@ def main() -> None:
                     chat_id = user["chat_id"]
                     if not chat_id:
                         continue
-                    # Fetch recent messages; with pruning, this contains the newest
-                    msgs = api.get_messages(chat_id, limit=100)
-                    if chat_id not in last_ids:
-                        last_ids[chat_id] = max((m.get("id", 0) for m in msgs), default=0)
+                    # Skip chats we know are invalid (404)
+                    if chat_id in invalid_chats:
                         continue
-                    new_msgs = [m for m in msgs if m.get("id", 0) > last_ids[chat_id]]
-                    for m in sorted(new_msgs, key=lambda x: x.get("id", 0)):
-                        last_ids[chat_id] = max(last_ids[chat_id], m.get("id", 0))
-                        if m.get("sent_from") == sender_number:
-                            continue  # skip our own sends
-                        event = {
-                            "data": {
-                                "chat_id": chat_id,
-                                "from_phone": m.get("sent_from"),
-                                "text": m.get("text", ""),
-                                "chat_handles": m.get("chat_handles") or [],
+                    try:
+                        # Fetch recent messages; with pruning, this contains the newest
+                        msgs, was_404 = api.get_messages(chat_id, limit=100)
+                        if was_404:
+                            # Mark chat as invalid and skip it in future polls
+                            invalid_chats.add(chat_id)
+                            log.info("Chat %d not found (404), marking as invalid and skipping future polls", chat_id)
+                            continue
+                        if chat_id not in last_ids:
+                            last_ids[chat_id] = max((m.get("id", 0) for m in msgs), default=0)
+                            continue
+                        new_msgs = [m for m in msgs if m.get("id", 0) > last_ids[chat_id]]
+                        for m in sorted(new_msgs, key=lambda x: x.get("id", 0)):
+                            last_ids[chat_id] = max(last_ids[chat_id], m.get("id", 0))
+                            if m.get("sent_from") == sender_number:
+                                continue  # skip our own sends
+                            event = {
+                                "data": {
+                                    "chat_id": chat_id,
+                                    "from_phone": m.get("sent_from"),
+                                    "text": m.get("text", ""),
+                                    "chat_handles": m.get("chat_handles") or [],
+                                }
                             }
-                        }
-                        process_event(event, graph, log)
+                            process_event(event, graph, log)
+                    except Exception as exc:
+                        # Log error but continue processing other users
+                        log.warning("Error processing chat %d for user %s: %s", 
+                                   chat_id, user.get("phone_number", "unknown"), exc)
+                        continue
                 time.sleep(cfg.poll_interval_sec)
         else:
             while should_run:

@@ -61,7 +61,9 @@ def fetch_new_messages(api: SeriesAPI, chat_id: int, last_id: int, log=None, las
     current_count = api.get_chat_message_count(chat_id)
     
     # Try the list endpoint first
-    messages = api.get_messages(chat_id, limit=100)
+    messages, was_404 = api.get_messages(chat_id, limit=100)
+    if was_404:
+        return []  # Chat doesn't exist
     max_list_id = max((m.get("id", 0) for m in messages), default=0)
     
     fresh = [m for m in messages if isinstance(m.get("id"), int) and m["id"] > last_id]
@@ -142,7 +144,10 @@ def run_fastlane(
     # Initialize last_ids by fetching current messages so we don't re-process old ones
     # Because the list API pagination is broken, we need to scan to find the real max ID
     try:
-        existing_msgs = api.get_messages(leon_chat, limit=100)
+        existing_msgs, was_404 = api.get_messages(leon_chat, limit=100)
+        if was_404:
+            log.warning("Chat %d not found (404), skipping initialization", leon_chat)
+            return
         max_list_id = max((m.get("id", 0) for m in existing_msgs), default=0)
         log.info("List endpoint max_id: %d (found %d msgs)", max_list_id, len(existing_msgs))
         
