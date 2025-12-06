@@ -289,6 +289,8 @@ class ConversationStateQueries:
         self.conn = conn
         self.log = logging.getLogger("orbit.db.state")
 
+    _UNSET = object()
+
     def get_by_user_id(self, user_id: int) -> Optional[sqlite3.Row]:
         """Get conversation state for user."""
         cur = self.conn.execute(
@@ -301,11 +303,18 @@ class ConversationStateQueries:
         user_id: int,
         current_node: Optional[str] = None,
         context: Optional[Dict] = None,
-        match_in_progress: Optional[int] = None,
+        match_in_progress: Optional[int] | object = _UNSET,
     ) -> None:
         """Create or update conversation state."""
         context_json = json.dumps(context) if context else None
         existing = self.get_by_user_id(user_id)
+
+        # Decide stored values (explicit None should clear, _UNSET preserves existing)
+        match_value = None
+        if match_in_progress is ConversationStateQueries._UNSET:
+            match_value = existing["match_in_progress"] if existing else None
+        else:
+            match_value = match_in_progress
 
         if existing:
             self.conn.execute(
@@ -317,9 +326,7 @@ class ConversationStateQueries:
                 (
                     current_node or existing["current_node"],
                     context_json or existing["context"],
-                    match_in_progress
-                    if match_in_progress is not None
-                    else existing["match_in_progress"],
+                    match_value,
                     utc_now_iso(),
                     user_id,
                 ),
@@ -330,7 +337,7 @@ class ConversationStateQueries:
                 INSERT INTO conversation_state (user_id, current_node, context, match_in_progress, updated_at)
                 VALUES (?, ?, ?, ?, ?)
                 """,
-                (user_id, current_node, context_json, match_in_progress, utc_now_iso()),
+                (user_id, current_node, context_json, match_value, utc_now_iso()),
             )
         self.conn.commit()
 

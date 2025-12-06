@@ -1,7 +1,14 @@
-"""Onboarding node for profile building."""
+"""Onboarding node for profile building.
+
+PROPER IMPLEMENTATION using LangChain-LangGraph patterns:
+- Extracts message from proper HumanMessage types
+- Returns AIMessage for response (will be added to messages via add_messages)
+"""
 import json
 import logging
 from typing import Any, Dict
+
+from langchain_core.messages import AIMessage, HumanMessage
 
 from ...prompts import PROFILE_UPDATE_PROMPT
 from ...utils.llm import get_llm
@@ -116,13 +123,27 @@ def update_profile_summary(
 
 
 def onboarding_node(state: Dict[str, Any], db: Any) -> Dict[str, Any]:
-    """Handle onboarding flow."""
+    """Handle onboarding flow.
+    
+    PROPER: Extracts message from messages list (HumanMessage types) 
+    and returns response that will be added to messages via add_messages.
+    """
     log = logging.getLogger("orbit.agent.onboarding")
 
     user = state.get("user", {})
     profile = state.get("profile", {})
-    message = state.get("message", "")
     user_id = state.get("user_id")
+    
+    # PROPER: Extract message from messages list or fall back to legacy field
+    message = ""
+    messages = state.get("messages", [])
+    if messages:
+        for msg in reversed(messages):
+            if isinstance(msg, HumanMessage):
+                message = msg.content
+                break
+    if not message:
+        message = state.get("message", "")
 
     if not user_id:
         return {"response": "Sorry, I couldn't find your profile. Let's start over.", "error": "No user_id"}
@@ -183,8 +204,10 @@ def onboarding_node(state: Dict[str, Any], db: Any) -> Dict[str, Any]:
 
     log.info("Onboarding response generated for step %d -> %d", current_step, next_step)
 
+    # PROPER: Return both messages (for new pattern) and response (for legacy)
     return {
-        "response": response,
+        "messages": [AIMessage(content=response)],  # Will be appended via add_messages
+        "response": response,  # Legacy field for backward compatibility
         "next_node": "save_and_respond",
         "db_updates": [{"type": "onboarding_step", "user_id": user_id, "step": next_step}],
     }

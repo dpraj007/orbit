@@ -1,7 +1,14 @@
-"""Router node for intent classification."""
+"""Router node for intent classification.
+
+PROPER IMPLEMENTATION using LangChain-LangGraph patterns:
+- Extracts messages from state using proper message types
+- Uses HumanMessage content for intent classification
+"""
 import json
 import logging
 from typing import Any, Dict
+
+from langchain_core.messages import HumanMessage
 
 from ..prompts import INTENT_CLASSIFICATION_PROMPT
 from ..utils.llm import get_llm
@@ -61,9 +68,28 @@ def load_context_node(state: Dict[str, Any], db: Any) -> Dict[str, Any]:
 
 
 def classify_intent_node(state: Dict[str, Any]) -> Dict[str, Any]:
-    """Classify user intent."""
+    """Classify user intent.
+    
+    PROPER: Extracts message from either:
+    - state["messages"] (new LangGraph pattern with HumanMessage types)
+    - state["message"] (legacy string field for backward compatibility)
+    """
     log = logging.getLogger("orbit.agent.router")
-    message = state.get("message", "")
+    
+    # PROPER: Try to get message from messages list first (new pattern)
+    message = ""
+    messages = state.get("messages", [])
+    if messages:
+        # Get the last human message from the messages list
+        for msg in reversed(messages):
+            if isinstance(msg, HumanMessage):
+                message = msg.content
+                break
+    
+    # Fallback to legacy message field
+    if not message:
+        message = state.get("message", "")
+    
     user = state.get("user", {})
     conv_state = state.get("conversation_state", {})
 
@@ -82,6 +108,9 @@ def classify_intent_node(state: Dict[str, Any]) -> Dict[str, Any]:
         intent = "general"
         # Map intent based on status / message
         lower_msg = message.lower().strip()
+        icebreaker_kw = any(
+            kw in lower_msg for kw in ["icebreaker", "ice breaker", "opener", "conversation starter", "start the conversation"]
+        )
         has_match_kw = any(kw in lower_msg for kw in ["match", "intro"])
         has_new_match = ("new" in lower_msg and "match" in lower_msg) or lower_msg in {"new match"}
         has_yes_no = (
@@ -93,6 +122,8 @@ def classify_intent_node(state: Dict[str, Any]) -> Dict[str, Any]:
 
         if status == "onboarding":
             intent = "onboarding"
+        elif icebreaker_kw:
+            intent = "mentor"
         elif current_node == "connected":
             if has_new_match:
                 intent = "matching"
@@ -122,6 +153,7 @@ def route_to_node(state: Dict[str, Any]) -> str:
 
     routing_map = {
         "onboarding": "onboarding",
+        "matching": "matching",
         "match_decision": "matching",
         "mentor": "mentor",
         "settings": "general",

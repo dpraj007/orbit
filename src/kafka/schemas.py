@@ -1,7 +1,7 @@
 """Pydantic schemas for Kafka message formats."""
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class ChatHandle(BaseModel):
@@ -20,6 +20,26 @@ class KafkaEventData(BaseModel):
     chat_handles: Optional[List[ChatHandle]] = Field(default_factory=list)
     message_id: Optional[int] = None
     attachments: Optional[List[Dict[str, Any]]] = Field(default_factory=list)
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_handles(cls, values: Dict[str, Any]) -> Dict[str, Any]:
+        """Allow chat_handles to be passed as phone strings or dicts."""
+        handles = values.get("chat_handles")
+        if not handles:
+            values["chat_handles"] = []
+            return values
+
+        normalized = []
+        for handle in handles:
+            if isinstance(handle, ChatHandle):
+                normalized.append(handle.model_dump())
+            elif isinstance(handle, str):
+                normalized.append({"phone_number": handle})
+            elif isinstance(handle, dict):
+                normalized.append(handle)
+        values["chat_handles"] = normalized
+        return values
 
 
 class KafkaEvent(BaseModel):

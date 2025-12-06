@@ -1,9 +1,16 @@
-"""LangGraph graph definition for dating agent."""
+"""LangGraph graph definition for dating agent.
+
+PROPER IMPLEMENTATION using LangChain-LangGraph patterns:
+- Uses START constant for entry point (not set_entry_point)
+- Uses proper message types for LLM communication
+- Graph nodes return messages that accumulate via add_messages reducer
+"""
 import logging
 import time
 from typing import Any, Dict
 
-from langgraph.graph import END, StateGraph
+from langgraph.graph import END, START, StateGraph
+from langchain_core.messages import AIMessage, HumanMessage
 
 from ..api import SeriesAPI
 from ..db import Database
@@ -13,7 +20,10 @@ from .state import DatingState
 
 
 def general_node(state: Dict[str, Any], db: Any) -> Dict[str, Any]:
-    """Handle general/fallback messages."""
+    """Handle general/fallback messages.
+    
+    PROPER: Returns AIMessage for response (will be added to messages via add_messages).
+    """
     log = logging.getLogger("orbit.agent.general")
 
     user = state.get("user", {})
@@ -26,7 +36,8 @@ def general_node(state: Dict[str, Any], db: Any) -> Dict[str, Any]:
     else:
         response = "I'm here to help with dating! Say 'find match' to start or 'help' for advice."
 
-    return {"response": response, "next_node": "save_and_respond"}
+    # PROPER: Return both messages (for new pattern) and response (for legacy)
+    return {"messages": [AIMessage(content=response)], "response": response, "next_node": "save_and_respond"}
 
 
 def save_and_respond_node(state: Dict[str, Any], db: Any, api: SeriesAPI) -> Dict[str, Any]:
@@ -149,8 +160,9 @@ def build_graph(db: Database, api: SeriesAPI) -> StateGraph:
     graph.add_node("general", general_wrapper)
     graph.add_node("save_and_respond", save_and_respond_wrapper)
 
-    # Set entry point
-    graph.set_entry_point("load_context")
+    # PROPER: Use START constant instead of set_entry_point()
+    # This is the recommended LangGraph v1.x pattern
+    graph.add_edge(START, "load_context")
 
     # Add edges
     graph.add_edge("load_context", "classify_intent")

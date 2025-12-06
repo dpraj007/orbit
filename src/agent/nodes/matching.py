@@ -1,8 +1,15 @@
-"""Matching node with bilateral LLM scoring."""
+"""Matching node with bilateral LLM scoring.
+
+PROPER IMPLEMENTATION using LangChain-LangGraph patterns:
+- Extracts message from proper HumanMessage types
+- Returns AIMessage for response (will be added to messages via add_messages)
+"""
 import json
 import logging
 import math
 from typing import Any, Dict, Optional, Tuple
+
+from langchain_core.messages import AIMessage, HumanMessage
 
 from ...prompts import BILATERAL_SCORING_PROMPT, MATCH_PITCH_PROMPT
 from ...utils.llm import get_llm
@@ -140,20 +147,95 @@ def generate_match_pitch(
 
 
 def matching_node(state: Dict[str, Any], db: Any) -> Dict[str, Any]:
-    """Handle matching flow."""
+    """Handle matching flow.
+    
+    PROPER: Extracts message from messages list (HumanMessage types)
+    and returns AIMessage for response.
+    """
     log = logging.getLogger("orbit.agent.matching")
 
     user = state.get("user", {})
     profile = state.get("profile", {})
-    message = state.get("message", "").lower()
     user_id = state.get("user_id")
     active_match = state.get("active_match")
+    conv_state = state.get("conversation_state") or {}
+    
+    # PROPER: Extract message from messages list or fall back to legacy field
+    message = ""
+    messages = state.get("messages", [])
+    if messages:
+        for msg in reversed(messages):
+            if isinstance(msg, HumanMessage):
+                message = msg.content.lower()
+                break
+    if not message:
+        message = state.get("message", "").lower()
 
     if not user_id or not profile:
-        return {"response": "I need to get to know you better first. Let's finish onboarding!"}
+        resp = "I need to get to know you better first. Let's finish onboarding!"
+        return {"messages": [AIMessage(content=resp)], "response": resp}
 
-    # Quick path: if user says yes, auto-intro fallback match immediately (demo)
-    conv_state = state.get("conversation_state") or {}
+    # Check if this is a match decision
+    if active_match:
+        # Handle decision
+        if "who" in message and len(message.strip()) <= 8:
+            # Give a quick teaser about the current match
+            other_user_id = (
+                active_match["user_b_id"]
+                if active_match["user_a_id"] == user_id
+                else active_match["user_a_id"]
+            )
+            other_profile = db.profiles.get_by_user_id(other_user_id)
+            pitch = generate_match_pitch(profile, dict(other_profile or {}), active_match.get("bilateral_score", 70), "Good vibe match.")
+            resp = f"I've got someone lined up. Quick teaser: {pitch}\n\nReady to meet? Reply yes or no."
+            return {"messages": [AIMessage(content=resp)], "response": resp}
+
+        decision = "yes" if message.startswith("y") else "no" if message.startswith("n") else None
+
+        if not decision:
+            resp = "I've got a match ready. Say yes to meet now or no to skip. Ask 'who?' for a quick teaser."
+            return {"messages": [AIMessage(content=resp)], "response": resp}
+
+        # Update match decision
+        match_id = active_match["id"]
+        if decision == "no":
+            db.matches.update_decision(match_id, user_id, decision)
+            db.conversation_state.upsert(user_id, current_node="active", match_in_progress=None)
+            resp = "No worries! I'll keep looking for someone who's the right fit."
+            return {"messages": [AIMessage(content=resp)], "response": resp, "next_node": "save_and_respond"}
+
+        # They said yes: force mutual and intro immediately
+        db.matches.force_mutual(match_id)
+        other_user_id = (
+            active_match["user_b_id"]
+            if active_match["user_a_id"] == user_id
+            else active_match["user_a_id"]
+        )
+        other_user = db.users.get_by_id(other_user_id)
+        other_name = other_user["name"] if other_user else "your match"
+        user_name = user.get("name", "you")
+
+        db.conversation_state.upsert(user_id, current_node="connected", match_in_progress=None)
+        if other_user:
+            db.conversation_state.upsert(other_user_id, current_node="connected", match_in_progress=None)
+
+        resp = f"Great news! I'm introducing you to {other_name or 'your match'} now. Have fun with your match!"
+        return {
+            "messages": [AIMessage(content=resp)],
+            "response": resp,
+            "next_node": "save_and_respond",
+            "db_updates": [
+                {
+                    "type": "create_group",
+                    "user_a_id": user_id,
+                    "user_b_id": other_user_id,
+                    "user_a_name": user_name,
+                    "user_b_name": other_name,
+                }
+            ],
+        }
+
+    # Quick path: if user says yes with no active match, auto-intro fallback match immediately (demo)
     if "yes" in message and conv_state.get("current_node") != "connected":
         # Ensure fallback exists
         fallback = db.users.get_by_phone("+15555550123")
@@ -180,8 +262,10 @@ def matching_node(state: Dict[str, Any], db: Any) -> Dict[str, Any]:
         db.conversation_state.upsert(user_id, current_node="connected", match_in_progress=None)
         db.conversation_state.upsert(match_user_id, current_node="connected", match_in_progress=None)
 
+        resp = f"{pitch}\n\nGreat news! I'm introducing you now."
         return {
-            "response": f"{pitch}\n\nGreat news! I’m introducing you now.",
+            "messages": [AIMessage(content=resp)],
+            "response": resp,
             "next_node": "save_and_respond",
             "db_updates": [
                 {
@@ -199,65 +283,10 @@ def matching_node(state: Dict[str, Any], db: Any) -> Dict[str, Any]:
         # Pass through to mentor/help if user asks for advice
         msg_lower = message.lower()
         if any(kw in msg_lower for kw in ["help", "advice", "feedback", "what do you think", "message", "text"]):
-            return {"response": "I can help you refine that. Tell me what you want to improve, or paste the message and I'll suggest tweaks.", "next_node": "mentor"}
-        return {"response": "You're already matched. Say 'new match' if you want me to look again."}
-
-    # Check if this is a match decision
-    if active_match:
-        # Handle decision
-        if "who" in message and len(message.strip()) <= 8:
-            # Give a quick teaser about the current match
-            other_user_id = (
-                active_match["user_b_id"]
-                if active_match["user_a_id"] == user_id
-                else active_match["user_a_id"]
-            )
-            other_profile = db.profiles.get_by_user_id(other_user_id)
-            pitch = generate_match_pitch(profile, dict(other_profile or {}), active_match.get("bilateral_score", 70), "Good vibe match.")
-            return {"response": f"I've got someone lined up. Quick teaser: {pitch}\n\nReady to meet? Reply yes or no."}
-
-        decision = "yes" if message.startswith("y") else "no" if message.startswith("n") else None
-
-        if not decision:
-            return {"response": "I’ve got a match ready. Say yes to meet now or no to skip. Ask “who?” for a quick teaser."}
-
-        # Update match decision
-        match_id = active_match["id"]
-        if decision == "no":
-            db.matches.update_decision(match_id, user_id, decision)
-            db.conversation_state.upsert(user_id, current_node="active", match_in_progress=None)
-            response = "No worries! I'll keep looking for someone who's the right fit."
-            return {"response": response, "next_node": "save_and_respond"}
-
-        # They said yes: force mutual and intro immediately
-        db.matches.force_mutual(match_id)
-        other_user_id = (
-            active_match["user_b_id"]
-            if active_match["user_a_id"] == user_id
-            else active_match["user_a_id"]
-        )
-        other_user = db.users.get_by_id(other_user_id)
-        other_name = other_user["name"] if other_user else "your match"
-        user_name = user.get("name", "you")
-
-        db.conversation_state.upsert(user_id, current_node="connected", match_in_progress=None)
-        if other_user:
-            db.conversation_state.upsert(other_user_id, current_node="connected", match_in_progress=None)
-
-        response = f"Great news! I’m introducing you to {other_name} now. Have fun!"
-        return {
-            "response": response,
-            "next_node": "save_and_respond",
-            "db_updates": [
-                {
-                    "type": "create_group",
-                    "user_a_id": user_id,
-                    "user_b_id": other_user_id,
-                    "user_a_name": user_name,
-                    "user_b_name": other_name,
-                }
-            ],
-        }
+            resp = "I can help you refine that. Tell me what you want to improve, or paste the message and I'll suggest tweaks."
+            return {"messages": [AIMessage(content=resp)], "response": resp, "next_node": "mentor"}
+        resp = "You're already matched. Say 'new match' if you want me to look again."
+        return {"messages": [AIMessage(content=resp)], "response": resp}
 
     # Not a decision - find a new match
     log.info("Finding new match for user %d", user_id)
@@ -305,8 +334,10 @@ def matching_node(state: Dict[str, Any], db: Any) -> Dict[str, Any]:
         db.matches.force_mutual(match_id)
         db.conversation_state.upsert(user_id, current_node="connected", match_in_progress=None)
         match_user = db.users.get_by_id(match_user_id)
+        resp = f"{pitch}\n\nGreat news—I'm introducing you now."
         return {
-            "response": f"{pitch}\n\nGreat news—I'm introducing you now.",
+            "messages": [AIMessage(content=resp)],
+            "response": resp,
             "next_node": "save_and_respond",
             "db_updates": [
                 {
@@ -331,6 +362,7 @@ def matching_node(state: Dict[str, Any], db: Any) -> Dict[str, Any]:
         )
 
         return {
+            "messages": [AIMessage(content=response)],
             "response": response,
             "next_node": "save_and_respond",
             "db_updates": [
@@ -342,4 +374,4 @@ def matching_node(state: Dict[str, Any], db: Any) -> Dict[str, Any]:
             ],
         }
 
-    return {"response": response, "next_node": "save_and_respond"}
+    return {"messages": [AIMessage(content=response)], "response": response, "next_node": "save_and_respond"}

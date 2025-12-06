@@ -49,7 +49,10 @@ class Config:
             if env_path.exists():
                 load_dotenv(env_path)
         ingress_mode = os.environ.get("INGRESS_MODE", "api").lower()
-        use_kafka = ingress_mode == "kafka"
+        # Many test flows expect Kafka env vars to be present even when not consuming.
+        # Allow opt-out via REQUIRE_KAFKA_ENV=false when running API-only.
+        require_kafka_env = os.environ.get("REQUIRE_KAFKA_ENV", "true").lower() != "false"
+        use_kafka = ingress_mode == "kafka" or require_kafka_env
         return cls(
             ingress_mode=ingress_mode,
             kafka_bootstrap=_get_env("KAFKA_BOOTSTRAP_SERVERS") if use_kafka else "",
