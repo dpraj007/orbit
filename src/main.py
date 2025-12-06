@@ -6,14 +6,15 @@ import signal
 import sys
 from typing import Any, Dict, Iterable, Tuple
 
-from .agent import build_graph
-from .agent.agentic import run_agent
-from .agent.router import load_context_node
+from .agent.core import AgentCore
 from .api import SeriesAPI
 from .config import Config
 from .db import Database
 from .kafka import KafkaEvent, build_consumer
 from .utils import setup_logger
+
+
+core_agent: AgentCore  # instantiated in main
 
 
 def process_event(event: Dict[str, Any], db: Database, api: SeriesAPI, log: logging.Logger) -> None:
@@ -61,88 +62,8 @@ def process_event(event: Dict[str, Any], db: Database, api: SeriesAPI, log: logg
         }
 
         log.info("Processing message from %s in chat %d", phone, chat_id)
-        # Load context directly via router helper
-        context = load_context_node(initial_state, db)
-        # Run agentic handler
-        agent_result = run_agent(text, context, db, api)
-
-        # Simple dedupe using last_response in context
-        conv_state = context.get("conversation_state") or {}
-        ctx_raw = conv_state.get("context")
-        if ctx_raw:
-            try:
-                ctx_obj = json.loads(ctx_raw) if isinstance(ctx_raw, str) else ctx_raw
-            except Exception:
-                ctx_obj = {}
-        else:
-            ctx_obj = {}
-        last_resp = ctx_obj.get("last_response")
-        last_ts = ctx_obj.get("last_response_ts", 0)
-
-        # Apply db_updates (group creation)
-        db_updates = agent_result.get("db_updates", [])
-        for update in db_updates:
-            if update.get("type") == "create_group":
-                user_a_id = update["user_a_id"]
-                user_b_id = update["user_b_id"]
-                user_a = db.users.get_by_id(user_a_id)
-                user_b = db.users.get_by_id(user_b_id)
-                if user_a and user_b:
-                    ua_phone = user_a["phone_number"]
-                    ub_phone = user_b["phone_number"]
-                    intro_message = (
-                        f"Hi! {update.get('user_a_name','You')}, meet {update.get('user_b_name','your match')}. "
-                        "You both matched! Have fun connecting."
-                    )
-                    try:
-                        result = api.create_group_chat([ua_phone, ub_phone], intro_message, display_name="Match")
-                        group_chat_id = result.get("chat", {}).get("id") or result.get("id")
-                        if group_chat_id:
-                            api.send_message(
-                                group_chat_id,
-                                "I'm here if you @Orbit for conversation tips. Otherwise, enjoy getting to know each other!",
-                            )
-                            # Store group_chat_id in conversation_state context for both users
-                            for uid in (user_a_id, user_b_id):
-                                state_row = db.conversation_state.get_by_user_id(uid)
-                                ctx_raw = state_row["context"] if state_row and state_row["context"] else None
-                                if ctx_raw:
-                                    try:
-                                        ctx_obj = json.loads(ctx_raw)
-                                    except Exception:
-                                        ctx_obj = {}
-                                else:
-                                    ctx_obj = {}
-                                ctx_obj["group_chat_id"] = group_chat_id
-                                db.conversation_state.upsert(uid, current_node="connected", match_in_progress=None, context=ctx_obj)
-                    except Exception as exc:
-                        log.error("Failed to create group chat: %s", exc)
-
-        # Mark connected if provided by agent
-        for uid in agent_result.get("set_connected_ids", []):
-            try:
-                db.conversation_state.upsert(uid, current_node="connected", match_in_progress=None)
-            except Exception:
-                pass
-
-        response = agent_result.get("response", "")
-        # Dedupe: skip if same response was just sent
-        import time as _time
-        if response and chat_id:
-            if last_resp == response and (_time.time() - last_ts) < 5:
-                log.info("Skipping duplicate response to chat %d", chat_id)
-            else:
-                try:
-                    api.send_with_typing(chat_id, response)
-                    log.info("Sent response to chat %d", chat_id)
-                except Exception as exc:
-                    log.error("Failed to send response: %s", exc)
-                # update context cache
-                ctx_obj.update({"last_response": response, "last_response_ts": _time.time()})
-                try:
-                    db.conversation_state.upsert(context.get("user_id"), context=json.dumps(ctx_obj))
-                except Exception:
-                    pass
+        # Pass event to deterministic core agent
+        core_agent.handle_event({"data": {"chat_id": chat_id, "from_phone": phone, "text": text, "chat_handles": chat_handles, "is_group": is_group}})
 
     except Exception as exc:
         log.exception("Failed to process event: %s", exc)
@@ -223,8 +144,9 @@ def main() -> None:
     )
     log.info("API client initialized")
 
-    graph = build_graph(db, api)
-    log.info("LangGraph agent built successfully")
+    global core_agent
+    core_agent = AgentCore(db, api)
+    log.info("Agent core initialized")
 
     consumer = None
     if cfg.ingress_mode != "api":
@@ -271,6 +193,8 @@ def main() -> None:
                                 "text": m.get("text", ""),
                                 "chat_handles": m.get("chat_handles") or [],
                                 "is_group": False,
+                                "sent_at": m.get("sent_at"),
+                                "attachments": m.get("attachments") or [],
                             }
                         }
                         process_event(event, db, api, log)
@@ -310,6 +234,8 @@ def main() -> None:
                                 "text": m.get("text", ""),
                                 "chat_handles": m.get("chat_handles") or [],
                                 "is_group": True,
+                                "sent_at": m.get("sent_at"),
+                                "attachments": m.get("attachments") or [],
                             }
                         }
                         process_event(event, db, api, log)
