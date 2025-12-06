@@ -12,6 +12,7 @@ from .engine import process_event
 from .llm import WingmanLLM
 from .store import UserStore
 from .utils import setup_logger
+from .agent.graph import create_dating_graph
 
 
 def build_consumer(cfg: Config) -> KafkaConsumer:
@@ -33,6 +34,8 @@ def build_consumer(cfg: Config) -> KafkaConsumer:
 def main() -> None:
     cfg = Config.from_env()
     log = setup_logger(cfg.log_level)
+
+    # Initialize components
     store = UserStore(cfg.db_path)
     series_client = SeriesClient(
         cfg.series_base_url,
@@ -42,8 +45,15 @@ def main() -> None:
         sender_number=cfg.series_sender_number,
     )
     llm = WingmanLLM(cfg.openrouter_api_key, cfg.openrouter_model)
+
+    # Create LangGraph agent
+    log.info("Building LangGraph agent...")
+    graph = create_dating_graph(store, llm, series_client)
+
+    # Start Kafka consumer
     consumer = build_consumer(cfg)
     log.info("Orbit consumer started on topic %s", cfg.kafka_topic)
+    log.info("Dating agent ready with LangGraph")
 
     should_run = True
 
@@ -61,10 +71,13 @@ def main() -> None:
                 break
             try:
                 event: Dict[str, Any] = message.value
-                process_event(event, series_client, store, llm)
+                process_event(event, series_client, store, llm, graph)
             except Exception as exc:
                 log.exception("Failed to process message: %s", exc)
+
+    # Cleanup
     consumer.close()
+    store.close()
 
 
 if __name__ == "__main__":

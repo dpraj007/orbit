@@ -1,16 +1,17 @@
+import json
 import logging
 import sqlite3
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Dict, List, Optional
 
-from .utils import parse_csv, to_csv, utc_now_iso
+from .utils import utc_now_iso
 
 
 class UserStore:
     def __init__(self, db_path: str) -> None:
         self.db_path = Path(db_path)
         self.log = logging.getLogger("orbit.store")
-        self.conn = sqlite3.connect(self.db_path)
+        self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
         self._init_db()
 
@@ -18,191 +19,165 @@ class UserStore:
         self.conn.executescript(
             """
             CREATE TABLE IF NOT EXISTS users (
-                phone_number TEXT PRIMARY KEY,
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                phone_number TEXT UNIQUE NOT NULL,
+                chat_id INTEGER,
                 name TEXT,
-                status TEXT,
-                profile_bio TEXT,
-                profile_interests TEXT,
-                profile_vibe TEXT,
-                profile_dealbreakers TEXT,
-                current_match_id INTEGER,
-                active_group_chat_id INTEGER,
-                last_dm_chat_id INTEGER,
-                last_seen_at TEXT,
-                last_intro_at TEXT,
-                onboarding_step INTEGER DEFAULT 0
+                created_at TEXT,
+                updated_at TEXT,
+                dating_enabled INTEGER DEFAULT 1,
+                status TEXT
+            );
+            CREATE TABLE IF NOT EXISTS profiles (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                profile_summary TEXT,
+                looking_for_summary TEXT,
+                dealbreakers TEXT,
+                interests TEXT,
+                communication_style TEXT,
+                relationship_goal TEXT,
+                completeness REAL DEFAULT 0.0,
+                onboarding_step INTEGER DEFAULT 0,
+                updated_at TEXT,
+                FOREIGN KEY (user_id) REFERENCES users(id)
             );
             CREATE TABLE IF NOT EXISTS matches (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_a TEXT NOT NULL,
-                user_b TEXT NOT NULL,
-                shared_interests TEXT,
-                proposed_at TEXT,
-                state TEXT,
-                user_a_decision TEXT,
-                user_b_decision TEXT
+                user_a_id INTEGER NOT NULL,
+                user_b_id INTEGER NOT NULL,
+                bilateral_score REAL,
+                status TEXT,
+                user_a_decision TEXT DEFAULT 'pending',
+                user_b_decision TEXT DEFAULT 'pending',
+                created_at TEXT,
+                resolved_at TEXT,
+                FOREIGN KEY (user_a_id) REFERENCES users(id),
+                FOREIGN KEY (user_b_id) REFERENCES users(id)
+            );
+            CREATE TABLE IF NOT EXISTS conversation_state (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                current_node TEXT,
+                context TEXT,
+                match_in_progress INTEGER,
+                updated_at TEXT,
+                FOREIGN KEY (user_id) REFERENCES users(id),
+                FOREIGN KEY (match_in_progress) REFERENCES matches(id)
             );
             """
         )
         self.conn.commit()
 
-    def get_user(self, phone: str) -> Optional[sqlite3.Row]:
+    def get_user_by_phone(self, phone: str) -> Optional[sqlite3.Row]:
         cur = self.conn.execute("SELECT * FROM users WHERE phone_number=?", (phone,))
         return cur.fetchone()
 
-    def upsert_user(
-        self,
-        phone: str,
-        status: str,
-        name: Optional[str] = None,
-        profile_bio: Optional[str] = None,
-        profile_interests: Optional[str] = None,
-        profile_vibe: Optional[str] = None,
-        profile_dealbreakers: Optional[str] = None,
-        onboarding_step: Optional[int] = None,
-        last_dm_chat_id: Optional[int] = None,
-    ) -> None:
+    def get_user_by_id(self, user_id: int) -> Optional[sqlite3.Row]:
+        cur = self.conn.execute("SELECT * FROM users WHERE id=?", (user_id,))
+        return cur.fetchone()
+
+    def create_user(self, phone: str, chat_id: int, status: str = "onboarding") -> int:
         now = utc_now_iso()
-        existing = self.get_user(phone)
+        cur = self.conn.execute(
+            """
+            INSERT INTO users (phone_number, chat_id, created_at, updated_at, status)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (phone, chat_id, now, now, status),
+        )
+        self.conn.commit()
+        user_id = int(cur.lastrowid)
+
+        # Create empty profile
+        self.conn.execute(
+            """
+            INSERT INTO profiles (user_id, updated_at, completeness, onboarding_step)
+            VALUES (?, ?, 0.0, 0)
+            """,
+            (user_id, now),
+        )
+        self.conn.commit()
+        return user_id
+
+    def update_user(self, user_id: int, **kwargs) -> None:
+        fields = []
+        values = []
+        for key, value in kwargs.items():
+            if value is not None:
+                fields.append(f"{key}=?")
+                values.append(value)
+
+        if not fields:
+            return
+
+        fields.append("updated_at=?")
+        values.append(utc_now_iso())
+        values.append(user_id)
+
+        query = f"UPDATE users SET {', '.join(fields)} WHERE id=?"
+        self.conn.execute(query, values)
+        self.conn.commit()
+
+    def get_profile(self, user_id: int) -> Optional[sqlite3.Row]:
+        cur = self.conn.execute("SELECT * FROM profiles WHERE user_id=?", (user_id,))
+        return cur.fetchone()
+
+    def update_profile(self, user_id: int, **kwargs) -> None:
+        fields = []
+        values = []
+        for key, value in kwargs.items():
+            if value is not None:
+                fields.append(f"{key}=?")
+                values.append(value)
+
+        if not fields:
+            return
+
+        fields.append("updated_at=?")
+        values.append(utc_now_iso())
+        values.append(user_id)
+
+        query = f"UPDATE profiles SET {', '.join(fields)} WHERE user_id=?"
+        self.conn.execute(query, values)
+        self.conn.commit()
+
+    def get_conversation_state(self, user_id: int) -> Optional[sqlite3.Row]:
+        cur = self.conn.execute("SELECT * FROM conversation_state WHERE user_id=?", (user_id,))
+        return cur.fetchone()
+
+    def upsert_conversation_state(self, user_id: int, current_node: str, context: Dict, match_in_progress: Optional[int] = None) -> None:
+        existing = self.get_conversation_state(user_id)
+        now = utc_now_iso()
+        context_json = json.dumps(context)
+
         if existing:
             self.conn.execute(
                 """
-                UPDATE users
-                SET status=?, name=COALESCE(?, name), profile_bio=COALESCE(?, profile_bio),
-                    profile_interests=COALESCE(?, profile_interests),
-                    profile_vibe=COALESCE(?, profile_vibe),
-                    profile_dealbreakers=COALESCE(?, profile_dealbreakers),
-                    onboarding_step=COALESCE(?, onboarding_step),
-                    last_dm_chat_id=COALESCE(?, last_dm_chat_id),
-                    last_seen_at=?
-                WHERE phone_number=?
+                UPDATE conversation_state
+                SET current_node=?, context=?, match_in_progress=?, updated_at=?
+                WHERE user_id=?
                 """,
-                (
-                    status,
-                    name,
-                    profile_bio,
-                    profile_interests,
-                    profile_vibe,
-                    profile_dealbreakers,
-                    onboarding_step,
-                    last_dm_chat_id,
-                    now,
-                    phone,
-                ),
+                (current_node, context_json, match_in_progress, now, user_id),
             )
         else:
             self.conn.execute(
                 """
-                INSERT INTO users (phone_number, status, name, profile_bio, profile_interests,
-                    profile_vibe, profile_dealbreakers, onboarding_step, last_seen_at, last_dm_chat_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO conversation_state (user_id, current_node, context, match_in_progress, updated_at)
+                VALUES (?, ?, ?, ?, ?)
                 """,
-                (
-                    phone,
-                    status,
-                    name,
-                    profile_bio,
-                    profile_interests,
-                    profile_vibe,
-                    profile_dealbreakers,
-                    onboarding_step if onboarding_step is not None else 0,
-                    now,
-                    last_dm_chat_id,
-                ),
+                (user_id, current_node, context_json, match_in_progress, now),
             )
         self.conn.commit()
 
-    def update_profile(
-        self,
-        phone: str,
-        name: Optional[str] = None,
-        passion: Optional[str] = None,
-        vibe: Optional[str] = None,
-        dealbreakers: Optional[Iterable[str]] = None,
-        interests: Optional[Iterable[str]] = None,
-    ) -> None:
-        user = self.get_user(phone)
-        if not user:
-            return
-        new_interests = to_csv(parse_csv(user["profile_interests"]) + (list(interests) if interests else []))
-        new_dealbreakers = to_csv(parse_csv(user["profile_dealbreakers"]) + (list(dealbreakers) if dealbreakers else []))
-        bio_parts = [part for part in [user["profile_bio"], passion] if part]
-        bio = ". ".join([p.strip() for p in bio_parts if p.strip()])
-        self.conn.execute(
-            """
-            UPDATE users
-            SET name=COALESCE(?, name),
-                profile_bio=?,
-                profile_interests=?,
-                profile_vibe=COALESCE(?, profile_vibe),
-                profile_dealbreakers=?,
-                last_seen_at=?
-            WHERE phone_number=?
-            """,
-            (
-                name,
-                bio,
-                new_interests,
-                vibe,
-                new_dealbreakers,
-                utc_now_iso(),
-                phone,
-            ),
-        )
-        self.conn.commit()
-
-    def set_status(self, phone: str, status: str) -> None:
-        self.conn.execute(
-            "UPDATE users SET status=?, last_seen_at=? WHERE phone_number=?",
-            (status, utc_now_iso(), phone),
-        )
-        self.conn.commit()
-
-    def set_onboarding_step(self, phone: str, step: int) -> None:
-        self.conn.execute(
-            "UPDATE users SET onboarding_step=?, last_seen_at=? WHERE phone_number=?",
-            (step, utc_now_iso(), phone),
-        )
-        self.conn.commit()
-
-    def set_current_match(self, phone: str, match_id: Optional[int]) -> None:
-        self.conn.execute(
-            "UPDATE users SET current_match_id=?, last_seen_at=? WHERE phone_number=?",
-            (match_id, utc_now_iso(), phone),
-        )
-        self.conn.commit()
-
-    def set_group_chat(self, phone: str, chat_id: Optional[int]) -> None:
-        self.conn.execute(
-            "UPDATE users SET active_group_chat_id=?, last_intro_at=?, last_seen_at=? WHERE phone_number=?",
-            (chat_id, utc_now_iso(), utc_now_iso(), phone),
-        )
-        self.conn.commit()
-
-    def set_last_dm_chat(self, phone: str, chat_id: int) -> None:
-        self.conn.execute(
-            "UPDATE users SET last_dm_chat_id=?, last_seen_at=? WHERE phone_number=?",
-            (chat_id, utc_now_iso(), phone),
-        )
-        self.conn.commit()
-
-    def get_browsing_candidates(self, exclude_phone: str) -> List[sqlite3.Row]:
-        cur = self.conn.execute(
-            "SELECT * FROM users WHERE phone_number != ? AND status = 'BROWSING'",
-            (exclude_phone,),
-        )
-        return cur.fetchall()
-
-    def create_match(
-        self, user_a: str, user_b: str, shared_interests: Iterable[str], state: str = "proposed"
-    ) -> int:
-        shared = to_csv(shared_interests)
+    def create_match(self, user_a_id: int, user_b_id: int, bilateral_score: float, status: str = "pending_a") -> int:
+        now = utc_now_iso()
         cur = self.conn.execute(
             """
-            INSERT INTO matches (user_a, user_b, shared_interests, proposed_at, state, user_a_decision, user_b_decision)
-            VALUES (?, ?, ?, ?, ?, 'pending', 'pending')
+            INSERT INTO matches (user_a_id, user_b_id, bilateral_score, status, created_at)
+            VALUES (?, ?, ?, ?, ?)
             """,
-            (user_a, user_b, shared, utc_now_iso(), state),
+            (user_a_id, user_b_id, bilateral_score, status, now),
         )
         self.conn.commit()
         return int(cur.lastrowid)
@@ -211,34 +186,42 @@ class UserStore:
         cur = self.conn.execute("SELECT * FROM matches WHERE id=?", (match_id,))
         return cur.fetchone()
 
-    def update_match_decision(self, match_id: int, phone: str, decision: str) -> None:
+    def update_match_decision(self, match_id: int, user_id: int, decision: str) -> None:
         match = self.get_match(match_id)
         if not match:
             return
-        field = "user_a_decision" if match["user_a"] == phone else "user_b_decision"
+
+        field = "user_a_decision" if match["user_a_id"] == user_id else "user_b_decision"
+        other_field = "user_b_decision" if field == "user_a_decision" else "user_a_decision"
+        other_decision = match[other_field]
+
+        # Determine new status
+        if decision == "no":
+            new_status = "rejected"
+        elif decision == "yes" and other_decision == "yes":
+            new_status = "mutual"
+        elif decision == "yes":
+            new_status = "pending_b" if field == "user_a_decision" else "pending_a"
+        else:
+            new_status = match["status"]
+
         self.conn.execute(
-            f"UPDATE matches SET {field}=?, state=? WHERE id=?",
-            (
-                decision,
-                self._resolve_state(decision, match, phone, field),
-                match_id,
-            ),
+            f"UPDATE matches SET {field}=?, status=?, resolved_at=? WHERE id=?",
+            (decision, new_status, utc_now_iso() if new_status in ["mutual", "rejected"] else None, match_id),
         )
         self.conn.commit()
 
-    def _resolve_state(self, decision: str, match: sqlite3.Row, phone: str, field: str) -> str:
-        other_field = "user_b_decision" if field == "user_a_decision" else "user_a_decision"
-        other_decision = match[other_field]
-        if decision == "no":
-            return "declined"
-        if decision == "yes" and other_decision == "yes":
-            return "mutual"
-        if decision == "yes":
-            return "proposed"
-        return match["state"]
+    def get_browsing_users(self, exclude_user_id: int) -> List[sqlite3.Row]:
+        cur = self.conn.execute(
+            """
+            SELECT u.*, p.profile_summary, p.looking_for_summary, p.interests, p.communication_style, p.relationship_goal
+            FROM users u
+            JOIN profiles p ON u.id = p.user_id
+            WHERE u.id != ? AND u.status = 'browsing' AND p.completeness >= 0.5
+            """,
+            (exclude_user_id,),
+        )
+        return cur.fetchall()
 
-    def list_shared_interests(self, phone: str) -> List[str]:
-        user = self.get_user(phone)
-        if not user:
-            return []
-        return parse_csv(user["profile_interests"])
+    def close(self) -> None:
+        self.conn.close()
