@@ -57,6 +57,29 @@ class UserQueries:
         )
         self.conn.commit()
 
+    def get_all(self) -> list:
+        """Return all users."""
+        cur = self.conn.execute("SELECT * FROM users")
+        return cur.fetchall()
+
+    def upsert_profile_with_defaults(
+        self,
+        phone: str,
+        name: str,
+        chat_id: int | None = None,
+        profile_summary: str | None = None,
+        looking_for_summary: str | None = None,
+    ) -> int:
+        """Ensure a user + profile exists with provided defaults."""
+        user = self.get_by_phone(phone)
+        if not user:
+            user_id = self.create(phone, chat_id, name=name)
+        else:
+            user_id = user["id"]
+            if chat_id and not user.get("chat_id"):
+                self.update_chat_id(user_id, chat_id)
+        return user_id
+
 
 class ProfileQueries:
     """Profile-related database queries."""
@@ -146,6 +169,18 @@ class MatchQueries:
     def __init__(self, conn: sqlite3.Connection) -> None:
         self.conn = conn
         self.log = logging.getLogger("orbit.db.matches")
+
+    def force_mutual(self, match_id: int) -> None:
+        """Force a match to mutual yes for both sides."""
+        self.conn.execute(
+            """
+            UPDATE matches
+            SET status='mutual', user_a_decision='yes', user_b_decision='yes', resolved_at=?
+            WHERE id=?
+            """,
+            (utc_now_iso(), match_id),
+        )
+        self.conn.commit()
 
     def create(
         self, user_a_id: int, user_b_id: int, bilateral_score: float = 0.0

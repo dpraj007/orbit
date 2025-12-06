@@ -1,29 +1,54 @@
 """Utility package for shared helpers."""
+
+import json
 import logging
-import sys
+import time
 from datetime import datetime, timezone
+from typing import Any, Iterable, List, Optional
+
+from .llm import get_llm, reset_llm  # noqa: F401
 
 
 def utc_now_iso() -> str:
-    """Get current UTC time as ISO format string."""
     return datetime.now(timezone.utc).isoformat()
 
 
 def setup_logger(level: str = "INFO") -> logging.Logger:
-    """Configure and return the root logger for the application."""
-    log_level = getattr(logging, level.upper(), logging.INFO)
-    
-    # Configure root logger
     logging.basicConfig(
-        level=log_level,
-        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-        handlers=[logging.StreamHandler(sys.stdout)],
+        level=getattr(logging, level.upper(), logging.INFO),
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
-    
-    # Return orbit logger
-    logger = logging.getLogger("orbit")
-    logger.setLevel(log_level)
-    return logger
+    return logging.getLogger("orbit")
 
 
-__all__ = ["utc_now_iso", "setup_logger"]
+def chunk_text(text: str, max_len: int = 4000) -> List[str]:
+    if len(text) <= max_len:
+        return [text]
+    return [text[i : i + max_len] for i in range(0, len(text), max_len)]
+
+
+def safe_json(obj: Any) -> str:
+    try:
+        return json.dumps(obj, ensure_ascii=False)
+    except Exception:
+        return str(obj)
+
+
+def shared_interests(a: Iterable[str], b: Iterable[str]) -> List[str]:
+    set_a = {x.strip().lower() for x in a if x}
+    set_b = {x.strip().lower() for x in b if x}
+    return sorted(set_a.intersection(set_b))
+
+
+def backoff(retry: int, base: float = 0.5, cap: float = 8.0) -> float:
+    return min(cap, base * (2 ** retry)) + (0.05 * retry)
+
+
+def parse_csv(value: Optional[str]) -> List[str]:
+    if not value:
+        return []
+    return [part.strip() for part in value.split(",") if part.strip()]
+
+
+def to_csv(values: Iterable[str]) -> str:
+    return ", ".join(sorted({v.strip() for v in values if v and v.strip()}))

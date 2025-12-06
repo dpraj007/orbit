@@ -38,5 +38,6 @@ Create a short, engaging pitch (2-3 sentences) that:
 - Explains why they might connect well
 - Maintains anonymity (no name, specific identifiers)
 - Is warm and encouraging, not salesy
+- Keep the tone smooth, low-key, and natural. Avoid hype and exclamation marks.
 
 Output the pitch only, as if speaking directly to the user."""

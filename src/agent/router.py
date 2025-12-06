@@ -69,6 +69,7 @@ def classify_intent_node(state: Dict[str, Any]) -> Dict[str, Any]:
 
     status = user.get("status", "onboarding") if user else "onboarding"
     context = conv_state.get("current_node", "none") if conv_state else "none"
+    current_node = context
 
     # Build prompt
     prompt = INTENT_CLASSIFICATION_PROMPT.format(
@@ -78,23 +79,34 @@ def classify_intent_node(state: Dict[str, Any]) -> Dict[str, Any]:
     # Call LLM
     llm = get_llm()
     try:
-        result = llm.invoke(prompt)
-        # Extract content from AIMessage
-        if hasattr(result, "content"):
-            intent = result.content.strip().lower()
-        else:
-            intent = str(result).strip().lower()
+        intent = "general"
+        # Map intent based on status / message
+        lower_msg = message.lower().strip()
+        has_match_kw = any(kw in lower_msg for kw in ["match", "intro"])
+        has_new_match = ("new" in lower_msg and "match" in lower_msg) or lower_msg in {"new match"}
+        has_yes_no = (
+            "yes" in lower_msg
+            or "no" in lower_msg
+            or lower_msg in {"y", "yes", "sure", "yeah", "yep", "ok", "okay"}
+        )
+        wants_advice = any(kw in lower_msg for kw in ["help", "advice", "feedback", "message", "text", "wingman"])
 
-        # Map intent based on status and message content
-        message_lower = message.lower()
         if status == "onboarding":
             intent = "onboarding"
-        elif "find" in message_lower and ("match" in message_lower or "someone" in message_lower):
-            # Explicit routing for match requests - route to matching node
-            intent = "match_decision"
-        elif "yes" in message_lower or "no" in message_lower:
-            if state.get("active_match"):
+        elif current_node == "connected":
+            if has_new_match:
+                intent = "matching"
+            elif wants_advice:
+                intent = "mentor"
+            else:
+                intent = "general"
+        elif has_match_kw or has_new_match or has_yes_no:
+            if state.get("active_match") and has_yes_no:
                 intent = "match_decision"
+            else:
+                intent = "matching"
+        else:
+            intent = "general"
 
         log.info("Classified intent: %s (status=%s)", intent, status)
         return {"intent": intent, "current_node": "router"}

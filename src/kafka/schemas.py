@@ -5,10 +5,10 @@ from pydantic import BaseModel, Field
 
 
 class ChatHandle(BaseModel):
-    """Chat participant handle."""
+    """Chat handle from Kafka event."""
     display_name: Optional[str] = None
-    identifier: Optional[str] = None
-    is_me: Optional[bool] = False
+    phone_number: Optional[str] = None
+    is_me: Optional[bool] = None
 
 
 class KafkaEventData(BaseModel):

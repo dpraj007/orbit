@@ -1,8 +1,9 @@
 """Main entry point for Orbit dating agent."""
 import logging
+import time
 import signal
 import sys
-from typing import Any, Dict
+from typing import Any, Dict, Iterable, Tuple
 
 from .agent import build_graph
 from .api import SeriesAPI
@@ -15,21 +16,26 @@ from .utils import setup_logger
 def process_event(event: Dict[str, Any], graph: Any, log: logging.Logger) -> None:
     """Process a Kafka event through the LangGraph."""
     try:
-        # Parse event
-        kafka_event = KafkaEvent.from_dict(event)
-        data = kafka_event.data
+        if "event_type" in event:
+            # Kafka-style event
+            kafka_event = KafkaEvent.from_dict(event)
+            data = kafka_event.data
+            phone = data.from_phone
+            chat_id = data.chat_id
+            text = (data.text or "").strip()
+            chat_handles = data.chat_handles or []
+        else:
+            # Minimal REST-polled event
+            data = event.get("data", {})
+            phone = data.get("from_phone")
+            chat_id = data.get("chat_id")
+            text = (data.get("text") or "").strip()
+            chat_handles = data.get("chat_handles") or []
 
-        # Extract relevant fields
-        phone = data.from_phone
-        chat_id = data.chat_id
-        text = (data.text or "").strip()
-        chat_handles = data.chat_handles or []
-
-        if not phone or chat_id is None:
+        if not phone or chat_id is None or not text:
             log.warning("Skipping event missing phone/chat_id: %s", event)
             return
 
-        # Log all messages for debugging
         is_group = len(chat_handles) > 2
         log.info("📝 Message: '%s' from %s (group=%s, handles=%d)", 
                  text[:50] if text else "(empty)", phone, is_group, len(chat_handles))
@@ -39,7 +45,6 @@ def process_event(event: Dict[str, Any], graph: Any, log: logging.Logger) -> Non
         #     log.debug("Skipping group message without @orbit mention")
         #     return
 
-        # Build initial state
         initial_state = {
             "phone_number": phone,
             "chat_id": chat_id,
@@ -47,26 +52,78 @@ def process_event(event: Dict[str, Any], graph: Any, log: logging.Logger) -> Non
             "db_updates": [],
         }
 
-        # Run through graph
         log.info("Processing message from %s in chat %d", phone, chat_id)
         result = graph.invoke(initial_state)
-
         log.debug("Graph execution completed: %s", result.get("response", "")[:50])
 
     except Exception as exc:
         log.exception("Failed to process event: %s", exc)
 
 
+def seed_testers(db: Database, testers: Iterable[Tuple[str, str]]) -> None:
+    """Ensure known tester accounts exist without overwriting data."""
+    log = logging.getLogger("orbit.seed")
+    for phone, name in testers:
+        existing = db.users.get_by_phone(phone)
+        if not existing:
+            user_id = db.users.create(phone, name=name)
+            db.profiles.create(user_id)
+            log.info("Seeded tester %s", phone)
+        else:
+            user_id = existing["id"]
+            # Ensure profile exists
+            if not db.profiles.get_by_user_id(user_id):
+                db.profiles.create(user_id)
+
+    # Prepopulate profiles with friendly summaries
+    presets = {
+        "+16479165156": (
+            "Leon",
+            "Builder and tester trying Orbit; enjoys hiking and cooking. Chill fact-dropper starting a casual convo.",
+            "Curious, kind people; likes playful banter.",
+            0.9,
+        ),
+        "+19298776648": (
+            "Dhairyasheel",
+            "Product-minded, loves good coffee and long walks. Reads sci-fi.",
+            "Thoughtful, playful conversations.",
+            1.0,
+        ),
+        "+15555550123": (
+            "Donald",
+            "Easygoing, loves kayaking and cartoons. Down-to-earth and keeps things light. Great with dad jokes.",
+            "Fun, kind people who like to laugh; looking for low-drama connection.",
+            1.0,
+        ),
+    }
+    for phone, (pname, summary, looking, completeness) in presets.items():
+        user = db.users.get_by_phone(phone)
+        if not user:
+            user_id = db.users.create(phone, name=pname)
+            db.profiles.create(user_id)
+        else:
+            user_id = user["id"]
+        db.profiles.update_summary(user_id, summary, completeness)
+        db.profiles.update_field(user_id, "looking_for_summary", looking)
+        db.users.update_status(user_id, "active")
+
+
 def main() -> None:
     """Main entry point."""
-    # Load configuration
     cfg = Config.from_env()
     log = setup_logger(cfg.log_level)
 
-    # Initialize components
     log.info("Initializing Orbit dating agent...")
 
     db = Database(cfg.db_path)
+    seed_testers(
+        db,
+        [
+            ("+16479165156", "Leon"),
+            ("+19298776648", "Dhairyasheel"),
+            ("+15555550123", "Donald"),
+        ],
+    )
     log.info("Database initialized")
 
     api = SeriesAPI(
@@ -78,15 +135,14 @@ def main() -> None:
     )
     log.info("API client initialized")
 
-    # Build LangGraph
     graph = build_graph(db, api)
     log.info("LangGraph agent built successfully")
 
-    # Build Kafka consumer
-    consumer = build_consumer(cfg)
-    log.info("Kafka consumer started on topic %s", cfg.kafka_topic)
+    consumer = None
+    if cfg.ingress_mode != "api":
+        consumer = build_consumer(cfg)
+        log.info("Kafka consumer started on topic %s", cfg.kafka_topic)
 
-    # Setup signal handlers
     should_run = True
 
     def handle_signal(signum, frame):  # type: ignore[unused-argument]
@@ -97,22 +153,50 @@ def main() -> None:
     signal.signal(signal.SIGINT, handle_signal)
     signal.signal(signal.SIGTERM, handle_signal)
 
-    # Main event loop
     log.info("🚀 Orbit agent is running! Waiting for messages...")
 
     try:
-        while should_run:
-            for message in consumer:
-                if not should_run:
-                    break
-
-                event: Dict[str, Any] = message.value
-                log.info("📨 Received Kafka event: %s", str(event)[:200])
-                process_event(event, graph, log)
-
+        if cfg.ingress_mode == "api":
+            log.info("Ingress mode=api (REST polling). Kafka disabled.")
+            last_ids: Dict[int, int] = {}
+            sender_number = cfg.series_sender_number
+            while should_run:
+                users = db.users.get_all()
+                for user in users:
+                    chat_id = user["chat_id"]
+                    if not chat_id:
+                        continue
+                    # Fetch recent messages; with pruning, this contains the newest
+                    msgs = api.get_messages(chat_id, limit=100)
+                    if chat_id not in last_ids:
+                        last_ids[chat_id] = max((m.get("id", 0) for m in msgs), default=0)
+                        continue
+                    new_msgs = [m for m in msgs if m.get("id", 0) > last_ids[chat_id]]
+                    for m in sorted(new_msgs, key=lambda x: x.get("id", 0)):
+                        last_ids[chat_id] = max(last_ids[chat_id], m.get("id", 0))
+                        if m.get("sent_from") == sender_number:
+                            continue  # skip our own sends
+                        event = {
+                            "data": {
+                                "chat_id": chat_id,
+                                "from_phone": m.get("sent_from"),
+                                "text": m.get("text", ""),
+                                "chat_handles": m.get("chat_handles") or [],
+                            }
+                        }
+                        process_event(event, graph, log)
+                time.sleep(cfg.poll_interval_sec)
+        else:
+            while should_run:
+                for message in consumer:
+                    if not should_run:
+                        break
+                    event: Dict[str, Any] = message.value
+                    process_event(event, graph, log)
     finally:
         log.info("Closing connections...")
-        consumer.close()
+        if consumer:
+            consumer.close()
         db.close()
         log.info("Shutdown complete")
 

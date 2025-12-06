@@ -18,6 +18,7 @@ def _get_env(name: str, default: Optional[str] = None) -> str:
 
 @dataclass
 class Config:
+    ingress_mode: str
     kafka_bootstrap: str
     kafka_topic: str
     kafka_group: str
@@ -37,6 +38,7 @@ class Config:
     request_timeout: float = 10.0
     max_retries: int = 3
     stale_threshold_min: int = 45
+    poll_interval_sec: float = 3.0
     db_path: str = "./orbit.db"
     log_level: str = "INFO"
 
@@ -46,13 +48,16 @@ class Config:
             env_path = Path(".env")
             if env_path.exists():
                 load_dotenv(env_path)
+        ingress_mode = os.environ.get("INGRESS_MODE", "api").lower()
+        use_kafka = ingress_mode == "kafka"
         return cls(
-            kafka_bootstrap=_get_env("KAFKA_BOOTSTRAP_SERVERS"),
-            kafka_topic=_get_env("KAFKA_TOPIC"),
-            kafka_group=_get_env("KAFKA_CONSUMER_GROUP"),
-            kafka_client_id=_get_env("KAFKA_CLIENT_ID"),
-            kafka_sasl_username=_get_env("KAFKA_SASL_USERNAME"),
-            kafka_sasl_password=_get_env("KAFKA_SASL_PASSWORD"),
+            ingress_mode=ingress_mode,
+            kafka_bootstrap=_get_env("KAFKA_BOOTSTRAP_SERVERS") if use_kafka else "",
+            kafka_topic=_get_env("KAFKA_TOPIC") if use_kafka else "",
+            kafka_group=_get_env("KAFKA_CONSUMER_GROUP") if use_kafka else "",
+            kafka_client_id=_get_env("KAFKA_CLIENT_ID") if use_kafka else "",
+            kafka_sasl_username=_get_env("KAFKA_SASL_USERNAME") if use_kafka else "",
+            kafka_sasl_password=_get_env("KAFKA_SASL_PASSWORD") if use_kafka else "",
             kafka_security_protocol=os.environ.get("KAFKA_SECURITY_PROTOCOL", "SASL_SSL"),
             kafka_sasl_mechanism=os.environ.get("KAFKA_SASL_MECHANISM", "PLAIN"),
             series_base_url=os.environ.get("SERIES_BASE_URL", "").rstrip("/"),
@@ -63,6 +68,7 @@ class Config:
             request_timeout=float(os.environ.get("REQUEST_TIMEOUT_SEC", "10")),
             max_retries=int(os.environ.get("MAX_RETRIES", "3")),
             stale_threshold_min=int(os.environ.get("STALE_THRESHOLD_MIN", "45")),
+            poll_interval_sec=float(os.environ.get("POLL_INTERVAL_SEC", "3")),
             db_path=os.environ.get("DATABASE_PATH", "./orbit.db"),
             log_level=os.environ.get("LOG_LEVEL", "INFO"),
         )

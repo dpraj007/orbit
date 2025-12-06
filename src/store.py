@@ -42,6 +42,11 @@ class UserStore:
                 user_a_decision TEXT,
                 user_b_decision TEXT
             );
+            CREATE TABLE IF NOT EXISTS chat_offsets (
+                chat_id INTEGER PRIMARY KEY,
+                last_message_id INTEGER,
+                updated_at TEXT
+            );
             """
         )
         self.conn.commit()
@@ -242,3 +247,29 @@ class UserStore:
         if not user:
             return []
         return parse_csv(user["profile_interests"])
+
+    def ensure_user(self, phone: str, name: Optional[str] = None, status: str = "BROWSING") -> None:
+        """
+        Insert a user if they do not already exist, leaving existing rows untouched.
+        """
+        if self.get_user(phone):
+            return
+        self.upsert_user(phone, status=status, name=name)
+
+    def get_last_message_id(self, chat_id: int) -> Optional[int]:
+        cur = self.conn.execute("SELECT last_message_id FROM chat_offsets WHERE chat_id=?", (chat_id,))
+        row = cur.fetchone()
+        if not row:
+            return None
+        return int(row["last_message_id"])
+
+    def set_last_message_id(self, chat_id: int, message_id: int) -> None:
+        self.conn.execute(
+            """
+            INSERT INTO chat_offsets (chat_id, last_message_id, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(chat_id) DO UPDATE SET last_message_id=excluded.last_message_id, updated_at=excluded.updated_at
+            """,
+            (chat_id, message_id, utc_now_iso()),
+        )
+        self.conn.commit()

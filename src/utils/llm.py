@@ -16,7 +16,7 @@ except ImportError:
 _llm_instance: Optional[ChatOpenAI] = None
 
 
-def get_llm(temperature: float = 0.7) -> ChatOpenAI:
+def get_llm(temperature: float = 0.4) -> ChatOpenAI:
     """Get or create LLM instance."""
     global _llm_instance
 

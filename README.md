@@ -126,9 +126,18 @@ orbit/
    - Logging throughout
 
 ## Setup
+Quickstart: `./spool.sh both` (creates `.venv`, installs deps, loads `.env`, runs dashboard + agent + pruner).
+
 1) Create `.env` from `.env.example` and fill secrets (Kafka, Series API, OpenRouter key). The sample uses `https://series-hackathon-service-202642739529.us-east1.run.app` for `SERIES_BASE_URL`; replace if needed.  
-2) `pip install -r requirements.txt`  
-3) Run consumer: `python -m src.main`
+2) `pip install -r requirements.txt` (or let `./spool.sh` handle it)  
+3) Run consumer: `python -m src.main` (or `INGRESS_MODE=api ./spool.sh` for REST polling)
+
+### Fastlane demo (Leon ↔ Dhairyasheel intro)
+- Set `OPENROUTER_API_KEY` (and optionally `OPENAI_API_KEY` if you prefer) plus Series API creds.
+- Run `python -m src.fastlane` to auto-DM Leon, collect a reply, ask for an intro, assume Dhairyasheel says yes, create a group chat, and interject on @Orbit in the group. Uses typing indicators and Grok via OpenRouter.
+
+## Monitor
+Lightweight read-only dashboard: `python -m src.monitor` (defaults to http://localhost:8000). Shows users, matches, chats/messages (if SERIES creds provided).
 
 ## Notes
 - LLM: defaults to OpenRouter `x-ai/grok-4.1-fast`.  
