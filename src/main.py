@@ -1,50 +1,88 @@
-import json
+"""Main entry point for Orbit dating agent."""
 import logging
 import signal
 import sys
 from typing import Any, Dict
 
-from kafka import KafkaConsumer
-
-from .client import SeriesClient
+from .agent import build_graph
+from .api import SeriesAPI
 from .config import Config
-from .engine import process_event
-from .llm import WingmanLLM
-from .store import UserStore
+from .db import Database
+from .kafka import KafkaEvent, build_consumer
 from .utils import setup_logger
 
 
-def build_consumer(cfg: Config) -> KafkaConsumer:
-    return KafkaConsumer(
-        cfg.kafka_topic,
-        bootstrap_servers=cfg.kafka_bootstrap,
-        group_id=cfg.kafka_group,
-        client_id=cfg.kafka_client_id,
-        security_protocol=cfg.kafka_security_protocol,
-        sasl_mechanism=cfg.kafka_sasl_mechanism,
-        sasl_plain_username=cfg.kafka_sasl_username,
-        sasl_plain_password=cfg.kafka_sasl_password,
-        auto_offset_reset="latest",
-        enable_auto_commit=True,
-        value_deserializer=lambda v: json.loads(v.decode("utf-8")),
-    )
+def process_event(event: Dict[str, Any], graph: Any, log: logging.Logger) -> None:
+    """Process a Kafka event through the LangGraph."""
+    try:
+        # Parse event
+        kafka_event = KafkaEvent.from_dict(event)
+        data = kafka_event.data
+
+        # Extract relevant fields
+        phone = data.from_phone
+        chat_id = data.chat_id
+        text = (data.text or "").strip()
+        chat_handles = data.chat_handles or []
+
+        if not phone or chat_id is None:
+            log.warning("Skipping event missing phone/chat_id: %s", event)
+            return
+
+        # Skip group messages for now (unless @orbit is mentioned)
+        is_group = len(chat_handles) > 2
+        if is_group and "@orbit" not in text.lower():
+            log.debug("Skipping group message without @orbit mention")
+            return
+
+        # Build initial state
+        initial_state = {
+            "phone_number": phone,
+            "chat_id": chat_id,
+            "message": text,
+            "db_updates": [],
+        }
+
+        # Run through graph
+        log.info("Processing message from %s in chat %d", phone, chat_id)
+        result = graph.invoke(initial_state)
+
+        log.debug("Graph execution completed: %s", result.get("response", "")[:50])
+
+    except Exception as exc:
+        log.exception("Failed to process event: %s", exc)
 
 
 def main() -> None:
+    """Main entry point."""
+    # Load configuration
     cfg = Config.from_env()
     log = setup_logger(cfg.log_level)
-    store = UserStore(cfg.db_path)
-    series_client = SeriesClient(
+
+    # Initialize components
+    log.info("Initializing Orbit dating agent...")
+
+    db = Database(cfg.db_path)
+    log.info("Database initialized")
+
+    api = SeriesAPI(
         cfg.series_base_url,
         cfg.series_api_key,
         timeout=cfg.request_timeout,
         max_retries=cfg.max_retries,
         sender_number=cfg.series_sender_number,
     )
-    llm = WingmanLLM(cfg.openrouter_api_key, cfg.openrouter_model)
-    consumer = build_consumer(cfg)
-    log.info("Orbit consumer started on topic %s", cfg.kafka_topic)
+    log.info("API client initialized")
 
+    # Build LangGraph
+    graph = build_graph(db, api)
+    log.info("LangGraph agent built successfully")
+
+    # Build Kafka consumer
+    consumer = build_consumer(cfg)
+    log.info("Kafka consumer started on topic %s", cfg.kafka_topic)
+
+    # Setup signal handlers
     should_run = True
 
     def handle_signal(signum, frame):  # type: ignore[unused-argument]
@@ -55,16 +93,23 @@ def main() -> None:
     signal.signal(signal.SIGINT, handle_signal)
     signal.signal(signal.SIGTERM, handle_signal)
 
-    while should_run:
-        for message in consumer:
-            if not should_run:
-                break
-            try:
+    # Main event loop
+    log.info("🚀 Orbit agent is running! Waiting for messages...")
+
+    try:
+        while should_run:
+            for message in consumer:
+                if not should_run:
+                    break
+
                 event: Dict[str, Any] = message.value
-                process_event(event, series_client, store, llm)
-            except Exception as exc:
-                log.exception("Failed to process message: %s", exc)
-    consumer.close()
+                process_event(event, graph, log)
+
+    finally:
+        log.info("Closing connections...")
+        consumer.close()
+        db.close()
+        log.info("Shutdown complete")
 
 
 if __name__ == "__main__":
