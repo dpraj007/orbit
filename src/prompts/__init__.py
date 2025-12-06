@@ -1,4 +1,6 @@
 """Prompts module for LLM interactions."""
+from .agent import AGENT_PROMPT, MENTOR_PROMPT
+from .dynamic import GENERAL_RESPONSE_PROMPT
 from .matcher import BILATERAL_SCORING_PROMPT, MATCH_PITCH_PROMPT
 from .mentor import (
     CONVERSATION_CONTINUATION_PROMPT,
@@ -11,6 +13,9 @@ from .onboarding import PROFILE_EXTRACTION_PROMPT, PROFILE_UPDATE_PROMPT
 from .router import INTENT_CLASSIFICATION_PROMPT
 
 __all__ = [
+    "AGENT_PROMPT",
+    "MENTOR_PROMPT",
+    "GENERAL_RESPONSE_PROMPT",
     "INTENT_CLASSIFICATION_PROMPT",
     "PROFILE_EXTRACTION_PROMPT",
     "PROFILE_UPDATE_PROMPT",

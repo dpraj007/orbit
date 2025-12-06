@@ -3,6 +3,7 @@ import json
 import logging
 from typing import Any, Dict, Optional
 
+from ..prompts import GENERAL_RESPONSE_PROMPT
 from ..prompts.agent import AGENT_PROMPT, MENTOR_PROMPT
 from ..utils.llm import get_llm
 
@@ -30,25 +31,24 @@ def run_agent(
 
     msg_lower = message.lower().strip()
 
-    # Hard shortcut: if user explicitly wants a new match or says yes, auto intro fallback
-    wants_match = any(kw in msg_lower for kw in ["match", "intro", "connect"]) or msg_lower in {"y", "yes", "sure", "yeah", "ok", "okay"}
-    if wants_match and not connected:
+    # Hard shortcut: allow explicit new match anytime; otherwise only when not connected
+    explicit_new = any(kw in msg_lower for kw in ["new match", "another match", "intro", "connect"])
+    wants_match = explicit_new or (not connected and (any(kw in msg_lower for kw in ["match"]) or msg_lower in {"y", "yes", "sure", "yeah", "ok", "okay"}))
+    if wants_match:
         log.info("Agentic: auto-intro fallback")
         return auto_intro_fallback(user, profile, db, fallback_phone)
 
-    # If connected, handle mentor/help and avoid re-pitching
+    # If connected, handle mentor/help with LLM
     wants_help = any(kw in msg_lower for kw in ["help", "advice", "feedback", "message", "text", "wingman"])
     if connected and wants_help:
         return {"response": mentor_response(message, profile), "db_updates": []}
-    if connected:
-        return {"response": "You're already matched. Say 'new match' if you want me to look again.", "db_updates": []}
 
     # Otherwise, use LLM for a natural, concise reply with tool hints
-    llm = get_llm(temperature=0.4)
-    prompt = AGENT_PROMPT.format(
-        user_name=user.get("name") or "there",
+    llm = get_llm(temperature=0.45)
+    prompt = GENERAL_RESPONSE_PROMPT.format(
         status=user.get("status", "active"),
-        profile=summarize_profile(profile),
+        profile_summary=summarize_profile(profile),
+        context=conv_state.get("current_node", "general"),
         message=message,
     )
     try:
