@@ -136,76 +136,138 @@ def matching_node(state: Dict[str, Any], db: Any) -> Dict[str, Any]:
     if not user_id or not profile:
         return {"response": "I need to get to know you better first. Let's finish onboarding!"}
 
+    # Quick path: if user says yes, auto-intro fallback match immediately (demo)
+    conv_state = state.get("conversation_state") or {}
+    if "yes" in message and conv_state.get("current_node") != "connected":
+        # Ensure fallback exists
+        fallback = db.users.get_by_phone("+15555550123")
+        if not fallback:
+            fallback_id = db.users.create("+15555550123", None, name="Donald")
+            db.profiles.create(fallback_id)
+            db.profiles.update_summary(
+                fallback_id,
+                "Easygoing, loves kayaking and cartoons. Down-to-earth and keeps things light. Great with dad jokes.",
+                1.0,
+            )
+            db.profiles.update_field(fallback_id, "looking_for_summary", "Fun, kind people who like to laugh.")
+            fallback = db.users.get_by_phone("+15555550123")
+
+        match_user_id = fallback["id"]
+        score = 75.0
+        reason = "Good vibe and lighthearted energy."
+        match_profile = db.profiles.get_by_user_id(match_user_id)
+        match_profile_dict = dict(match_profile) if match_profile else {}
+        pitch = generate_match_pitch(profile, match_profile_dict, score, reason)
+
+        match_id = db.matches.create(user_id, match_user_id, score)
+        db.matches.force_mutual(match_id)
+        db.conversation_state.upsert(user_id, current_node="connected", match_in_progress=None)
+        db.conversation_state.upsert(match_user_id, current_node="connected", match_in_progress=None)
+
+        return {
+            "response": f"{pitch}\n\nGreat news! I’m introducing you now.",
+            "next_node": "save_and_respond",
+            "db_updates": [
+                {
+                    "type": "create_group",
+                    "user_a_id": user_id,
+                    "user_b_id": match_user_id,
+                    "user_a_name": user.get("name", "You"),
+                    "user_b_name": fallback["name"],
+                }
+            ],
+        }
+
+    # If already connected, don't loop the prompt
+    if conv_state.get("current_node") == "connected":
+        # Pass through to mentor/help if user asks for advice
+        msg_lower = message.lower()
+        if any(kw in msg_lower for kw in ["help", "advice", "feedback", "what do you think", "message", "text"]):
+            return {"response": "I can help you refine that. Tell me what you want to improve, or paste the message and I'll suggest tweaks.", "next_node": "mentor"}
+        return {"response": "You're already matched. Say 'new match' if you want me to look again."}
+
     # Check if this is a match decision
     if active_match:
         # Handle decision
+        if "who" in message and len(message.strip()) <= 8:
+            # Give a quick teaser about the current match
+            other_user_id = (
+                active_match["user_b_id"]
+                if active_match["user_a_id"] == user_id
+                else active_match["user_a_id"]
+            )
+            other_profile = db.profiles.get_by_user_id(other_user_id)
+            pitch = generate_match_pitch(profile, dict(other_profile or {}), active_match.get("bilateral_score", 70), "Good vibe match.")
+            return {"response": f"I've got someone lined up. Quick teaser: {pitch}\n\nReady to meet? Reply yes or no."}
+
         decision = "yes" if message.startswith("y") else "no" if message.startswith("n") else None
 
         if not decision:
-            return {"response": "Can you confirm yes or no for this match?"}
+            return {"response": "I’ve got a match ready. Say yes to meet now or no to skip. Ask “who?” for a quick teaser."}
 
         # Update match decision
         match_id = active_match["id"]
-        updated_match = db.matches.update_decision(match_id, user_id, decision)
-
         if decision == "no":
-            # They declined
+            db.matches.update_decision(match_id, user_id, decision)
             db.conversation_state.upsert(user_id, current_node="active", match_in_progress=None)
             response = "No worries! I'll keep looking for someone who's the right fit."
             return {"response": response, "next_node": "save_and_respond"}
 
-        # They said yes
-        if updated_match["status"] == "mutual":
-            # Mutual match!
-            other_user_id = (
-                updated_match["user_b_id"]
-                if updated_match["user_a_id"] == user_id
-                else updated_match["user_a_id"]
-            )
+        # They said yes: force mutual and intro immediately
+        db.matches.force_mutual(match_id)
+        other_user_id = (
+            active_match["user_b_id"]
+            if active_match["user_a_id"] == user_id
+            else active_match["user_a_id"]
+        )
+        other_user = db.users.get_by_id(other_user_id)
+        other_name = other_user["name"] if other_user else "your match"
+        user_name = user.get("name", "you")
 
-            # Get other user info
-            other_user = db.users.get_by_id(other_user_id)
-            other_profile = db.profiles.get_by_user_id(other_user_id)
+        db.conversation_state.upsert(user_id, current_node="connected", match_in_progress=None)
+        if other_user:
+            db.conversation_state.upsert(other_user_id, current_node="connected", match_in_progress=None)
 
-            user_name = user.get("name", "someone")
-            other_name = other_user["name"] if other_user else "your match"
-
-            response = (
-                f"Great news! It's a mutual match with {other_name}! "
-                f"I'll introduce you both now. Have fun connecting!"
-            )
-
-            # Create group chat (will be handled in save_and_respond)
-            db.conversation_state.upsert(user_id, current_node="connected", match_in_progress=None)
-
-            return {
-                "response": response,
-                "next_node": "save_and_respond",
-                "db_updates": [
-                    {
-                        "type": "create_group",
-                        "user_a_id": user_id,
-                        "user_b_id": other_user_id,
-                        "user_a_name": user_name,
-                        "user_b_name": other_name,
-                    }
-                ],
-            }
-        else:
-            # Waiting for other person
-            response = "Noted! I'm waiting to hear from them. I'll let you know when they respond."
-            return {"response": response, "next_node": "save_and_respond"}
+        response = f"Great news! I’m introducing you to {other_name} now. Have fun!"
+        return {
+            "response": response,
+            "next_node": "save_and_respond",
+            "db_updates": [
+                {
+                    "type": "create_group",
+                    "user_a_id": user_id,
+                    "user_b_id": other_user_id,
+                    "user_a_name": user_name,
+                    "user_b_name": other_name,
+                }
+            ],
+        }
 
     # Not a decision - find a new match
     log.info("Finding new match for user %d", user_id)
 
     match_result = find_best_match(user_id, profile, db)
 
+    is_fallback = False
     if not match_result:
-        response = "I'm still looking for someone with the right vibe. I'll ping you when I find a great match!"
-        return {"response": response, "next_node": "save_and_respond"}
-
-    match_user_id, score, reason = match_result
+        # Fallback: use a warm preset match (Donald)
+        is_fallback = True
+        fallback = db.users.get_by_phone("+15555550123")
+        if not fallback:
+            fallback_id = db.users.create("+15555550123", None, name="Donald")
+            db.profiles.create(fallback_id)
+            db.profiles.update_summary(
+                fallback_id,
+                "Easygoing, loves kayaking and cartoons. Down-to-earth and keeps things light.",
+                1.0,
+            )
+            db.profiles.update_field(fallback_id, "looking_for_summary", "Fun, kind people who like to laugh.")
+            fallback = db.users.get_by_phone("+15555550123")
+        match_user_id = fallback["id"]
+        score = 75.0
+        reason = "Good vibe and lighthearted energy."
+    else:
+        match_user_id, score, reason = match_result
 
     # Create match in database
     match_id = db.matches.create(user_id, match_user_id, score)
@@ -221,6 +283,25 @@ def matching_node(state: Dict[str, Any], db: Any) -> Dict[str, Any]:
 
     # Update conversation state
     db.conversation_state.upsert(user_id, current_node="match_decision", match_in_progress=match_id)
+
+    # If fallback, auto-approve and create group immediately
+    if is_fallback:
+        db.matches.force_mutual(match_id)
+        db.conversation_state.upsert(user_id, current_node="connected", match_in_progress=None)
+        match_user = db.users.get_by_id(match_user_id)
+        return {
+            "response": f"{pitch}\n\nGreat news—I'm introducing you now.",
+            "next_node": "save_and_respond",
+            "db_updates": [
+                {
+                    "type": "create_group",
+                    "user_a_id": user_id,
+                    "user_b_id": match_user_id,
+                    "user_a_name": user.get('name', 'You'),
+                    "user_b_name": match_user['name'] if match_user else 'your match',
+                }
+            ],
+        }
 
     # Notify the match candidate too
     match_user = db.users.get_by_id(match_user_id)

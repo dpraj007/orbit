@@ -10,6 +10,8 @@ from .utils import get_llm, setup_logger
 
 LEON_PHONE = "+16479165156"
 DHAIRYA_PHONE = "+19298776648"
+LEON_CHAT_DEFAULT = 1701689
+DHAIRYA_CHAT_DEFAULT = 1701723
 
 
 def send_with_typing(api: SeriesAPI, chat_id: int, text: str, delay: float = 1.2) -> None:
@@ -125,17 +127,13 @@ def run_fastlane(
     ensure_tester_profiles(db)
 
     leon_user = db.users.get_by_phone(LEON_PHONE)
-    leon_chat = _pick_leon_chat(api, log)
+    # Use stored chat_id if present; fallback to known chat id; avoid broken list filter
+    leon_chat = None
+    if leon_user and leon_user["chat_id"]:
+        leon_chat = leon_user["chat_id"]
     if not leon_chat:
-        # As a fallback, create a DM chat
-        try:
-            created = api.create_chat(LEON_PHONE, "")
-            leon_chat = created.get("data", {}).get("id") or created.get("id")
-            log.info("Created DM chat -> chat_id=%s", leon_chat)
-        except Exception as exc:
-            report_error(f"Failed to create chat for Leon: {exc}")
-            return
-    if leon_user and leon_chat and leon_user.get("chat_id") != leon_chat:
+        leon_chat = LEON_CHAT_DEFAULT
+    if leon_user and leon_user["chat_id"] != leon_chat:
         db.users.update_chat_id(leon_user["id"], leon_chat)
     if not leon_chat:
         report_error("Unable to create/find chat for Leon")

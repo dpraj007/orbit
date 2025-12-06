@@ -126,7 +126,7 @@ orbit/
    - Logging throughout
 
 ## Setup
-Quickstart: `./spool.sh` (creates `.venv`, installs deps, loads `.env`, runs).
+Quickstart: `./spool.sh both` (creates `.venv`, installs deps, loads `.env`, runs dashboard + agent + pruner).
 
 1) Create `.env` from `.env.example` and fill secrets (Kafka, Series API, OpenRouter key). The sample uses `https://series-hackathon-service-202642739529.us-east1.run.app` for `SERIES_BASE_URL`; replace if needed.  
 2) `pip install -r requirements.txt` (or let `./spool.sh` handle it)  

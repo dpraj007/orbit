@@ -28,6 +28,7 @@ class Database:
         self.profiles = ProfileQueries(self.conn)
         self.matches = MatchQueries(self.conn)
         self.conversation_state = ConversationStateQueries(self.conn)
+        self._ensure_chat_history()
 
     def _init_tables(self) -> None:
         """Initialize all database tables."""
@@ -97,6 +98,53 @@ class Database:
         )
         self.conn.commit()
         self.log.info("Database initialized at %s", self.db_path)
+
+    def _ensure_chat_history(self) -> None:
+        """Ensure chat history table exists for auditing messages."""
+        self.conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS chat_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                message_id INTEGER UNIQUE,
+                chat_id INTEGER,
+                from_phone TEXT,
+                text TEXT,
+                sent_at TEXT,
+                created_at TEXT
+            )
+            """
+        )
+        self.conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_chat_history_chat ON chat_history(chat_id)
+            """
+        )
+        self.conn.commit()
+
+    def log_message(self, message_id: int, chat_id: int, from_phone: str, text: str, sent_at: Optional[str] = None) -> None:
+        """Insert message into chat_history if not already present."""
+        try:
+            self.conn.execute(
+                """
+                INSERT OR IGNORE INTO chat_history (message_id, chat_id, from_phone, text, sent_at, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (message_id, chat_id, from_phone, text, sent_at or utc_now_iso(), utc_now_iso()),
+            )
+            self.conn.commit()
+        except Exception as exc:
+            self.log.debug("log_message failed: %s", exc)
+
+    def reset_demo(self) -> None:
+        """Clear transient state to allow a fresh demo while keeping users/profiles."""
+        self.conn.executescript(
+            """
+            DELETE FROM matches;
+            DELETE FROM conversation_state;
+            DELETE FROM chat_history;
+            """
+        )
+        self.conn.commit()
 
     def close(self) -> None:
         """Close database connection."""

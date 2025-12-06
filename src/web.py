@@ -208,6 +208,13 @@ class OrbitWeb(BaseHTTPRequestHandler):
             clear_errors()
             self._json({"ok": True})
             return
+        if parsed.path == "/api/reset":
+            OrbitWeb.db.reset_demo()
+            clear_errors()
+            with _live_events_lock:
+                _live_events.clear()
+            self._json({"ok": True, "message": "Demo state reset"})
+            return
         if parsed.path == "/api/send":
             chat_id = int(body.get("chat_id") or 0)
             text = (body.get("text") or "").strip()
@@ -577,6 +584,10 @@ class OrbitWeb(BaseHTTPRequestHandler):
       <h1>🚀 Orbit Control</h1>
       <div class="pill"><span class="live-indicator"></span>Live Dashboard</div>
     </div>
+    <button class="demo-btn" style="padding:8px 14px; min-width:120px;" onclick="resetDemo()">
+      <span class="title">🔄 Reset Demo</span>
+      <span class="desc" style="font-size:11px;">Clear matches/state</span>
+    </button>
   </header>
   
   <!-- Demo Actions Section -->
@@ -588,10 +599,6 @@ class OrbitWeb(BaseHTTPRequestHandler):
     <button class="demo-btn" onclick="intro()" id="btn-intro">
       <span class="title">🤝 Create Intro</span>
       <span class="desc">Introduce Leon ↔ Dhairyasheel in a group chat</span>
-    </button>
-    <button class="demo-btn" onclick="toggleFastlane()" id="fastlane-btn">
-      <span class="title">⚡ Auto Demo</span>
-      <span class="desc" id="fastlane-desc">Run the full onboarding flow automatically</span>
     </button>
   </div>
   
@@ -609,11 +616,6 @@ class OrbitWeb(BaseHTTPRequestHandler):
           <h3>Activity Log</h3>
           <div class="activity-log" id="activity-log">No activity yet...</div>
         </div>
-        <div class="input-row" style="margin-top:12px;">
-          <input id="simulate-text" type="text" placeholder="Simulate Leon's reply..." onkeydown="if(event.key==='Enter')simulateLeon()" />
-          <button onclick="simulateLeon()" style="background:#3498db;">📱 Fake Leon</button>
-        </div>
-        <small style="color:#999;display:block;margin-top:4px;">Use this when Kafka isn't delivering messages</small>
       </div>
     </div>
     
@@ -740,39 +742,14 @@ class OrbitWeb(BaseHTTPRequestHandler):
       fetchSummary();
     }}
     
-    async function toggleFastlane() {{
-      const status = await getFastlaneStatus();
-      if (status.running) {{
-        await fetch('/api/fastlane/stop', {{method:'POST'}});
-      }} else {{
-        await fetch('/api/fastlane/start', {{method:'POST'}});
-      }}
-      await refreshFastlaneStatus();
-    }}
-    
-    async function getFastlaneStatus() {{
-      const res = await fetch('/api/fastlane/status');
-      return await res.json();
-    }}
-    
     async function refreshFastlaneStatus() {{
       try {{
-        const status = await getFastlaneStatus();
-        const btn = document.getElementById('fastlane-btn');
-        const desc = document.getElementById('fastlane-desc');
+        const res = await fetch('/api/fastlane/status');
+        const status = await res.json();
         const badge = document.getElementById('stage-badge');
         const watchEl = document.getElementById('watching-chat');
         const activityEl = document.getElementById('activity-log');
-        
-        // Update button
-        if (status.running) {{
-          btn.querySelector('.title').textContent = '⏹ Stop Demo';
-          desc.textContent = 'Demo is running - click to stop';
-        }} else {{
-          btn.querySelector('.title').textContent = '⚡ Auto Demo';
-          desc.textContent = 'Run the full onboarding flow automatically';
-        }}
-        
+
         // Update stage badge
         const stage = status.stage || 'idle';
         badge.textContent = stage.replace('_', ' ');
@@ -813,20 +790,6 @@ class OrbitWeb(BaseHTTPRequestHandler):
       if (currentChatId == chat) await loadMessages();
     }}
     
-    // Simulate Leon message (for testing when Kafka isn't working)
-    async function simulateLeon() {{
-      const input = document.getElementById('simulate-text');
-      const text = input.value.trim();
-      if (!text) return;
-      input.value = '';
-      await fetch('/api/simulate-leon', {{
-        method: 'POST',
-        headers: {{'Content-Type': 'application/json'}},
-        body: JSON.stringify({{text}})
-      }});
-      refreshFastlaneStatus();
-    }}
-    
     // Live events polling
     let lastLiveTs = Date.now() / 1000;
     async function fetchLiveEvents() {{
@@ -851,6 +814,16 @@ class OrbitWeb(BaseHTTPRequestHandler):
           }}
         }}
       }} catch (e) {{}}
+    }}
+
+    async function resetDemo() {{
+      if (!confirm("Reset demo state? This clears matches and conversation state but keeps users/profiles.")) return;
+      try {{
+        await fetch('/api/reset', {{method:'POST'}});
+        showToast('reset', 'Demo state cleared');
+        fetchSummary();
+        refreshFastlaneStatus();
+      }} catch (e) {{ console.error('resetDemo error', e); }}
     }}
     
     // Error toasts
@@ -1011,11 +984,61 @@ def run_server(port: int = 8080) -> None:
     kafka_thread = threading.Thread(target=_run_kafka_consumer, args=(cfg, log, db), daemon=True)
     kafka_thread.start()
 
+    # Start REST poller for live events (fallback when Kafka is empty)
+    rest_thread = threading.Thread(
+        target=_run_rest_live_poller, args=(cfg, log, db, api), daemon=True
+    )
+    rest_thread.start()
+
     server = HTTPServer(("localhost", port), OrbitWeb)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     log.info("Orbit dashboard on http://localhost:%d", port)
     thread.join()
+
+
+def _run_rest_live_poller(cfg: Config, log: logging.Logger, db: Database, api: SeriesAPI) -> None:
+    """Poll Series API for new messages to feed live events when Kafka is empty."""
+    last_ids: dict[int, int] = {}
+    sender = cfg.series_sender_number
+    while True:
+        try:
+            users = db.users.get_all()
+            for user in users:
+                chat_id = user.get("chat_id") if isinstance(user, dict) else user["chat_id"]
+                phone = user.get("phone_number") if isinstance(user, dict) else user["phone_number"]
+                if not chat_id:
+                    continue
+                msgs = api.get_messages(chat_id, limit=100)
+                new_msgs = [m for m in msgs if m.get("id", 0) > last_ids.get(chat_id, 0)]
+                new_msgs.sort(key=lambda m: m.get("id", 0))
+                for m in new_msgs:
+                    last_ids[chat_id] = max(last_ids.get(chat_id, 0), m.get("id", 0))
+                    if m.get("sent_from") == sender:
+                        continue  # skip our own sends
+                    # Persist to chat history
+                    if m.get("id"):
+                        db.log_message(
+                            m.get("id"),
+                            chat_id,
+                            m.get("sent_from") or phone,
+                            m.get("text", ""),
+                            m.get("sent_at"),
+                        )
+                    add_live_event(
+                        {
+                            "event_type": "message.received",
+                            "text": m.get("text", ""),
+                            "from_phone": m.get("sent_from") or phone,
+                            "chat_id": chat_id,
+                            "message_id": m.get("id"),
+                            "is_known": True,
+                        }
+                    )
+        except Exception as exc:
+            log.warning("REST live poller error: %s", exc)
+            add_error("rest-poller", str(exc))
+        time.sleep(cfg.poll_interval_sec)
 
 
 if __name__ == "__main__":

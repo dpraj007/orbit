@@ -48,7 +48,7 @@ class Config:
             env_path = Path(".env")
             if env_path.exists():
                 load_dotenv(env_path)
-        ingress_mode = os.environ.get("INGRESS_MODE", "kafka").lower()
+        ingress_mode = os.environ.get("INGRESS_MODE", "api").lower()
         use_kafka = ingress_mode == "kafka"
         return cls(
             ingress_mode=ingress_mode,

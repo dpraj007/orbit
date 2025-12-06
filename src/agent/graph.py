@@ -1,5 +1,6 @@
 """LangGraph graph definition for dating agent."""
 import logging
+import time
 from typing import Any, Dict
 
 from langgraph.graph import END, StateGraph
@@ -34,7 +35,23 @@ def save_and_respond_node(state: Dict[str, Any], db: Any, api: SeriesAPI) -> Dic
 
     response = state.get("response", "")
     chat_id = state.get("chat_id")
+    user_id = state.get("user_id")
+    conv_state = state.get("conversation_state") or {}
     db_updates = state.get("db_updates", [])
+
+    # Simple dedupe: if we just sent the same response to this user within a few seconds, skip
+    if user_id and response:
+        context = conv_state.get("context")
+        if context and isinstance(context, dict):
+            last_resp = context.get("last_response")
+            last_ts = context.get("last_response_ts", 0)
+            if last_resp == response and (time.time() - last_ts) < 5:
+                log.info("Skipping duplicate response for user %s", user_id)
+                response = ""
+        # Update context with last response
+        new_ctx = context.copy() if context and isinstance(context, dict) else {}
+        new_ctx.update({"last_response": response, "last_response_ts": time.time()})
+        db.conversation_state.upsert(user_id, context=new_ctx)
 
     # Process database updates
     for update in db_updates:
