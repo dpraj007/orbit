@@ -2,6 +2,14 @@
 
 Human-centered dating concierge that lives in iMessage. Orbit interviews users, proposes curated matches, creates/hosts introductions in a 3-person chat, and remains available for private sidebar advice. Tone: casual, concise, lightly warm; proactive but not spammy.
 
+## Tech Stack
+- Python 3.9+.  
+- Ingress: Kafka (Confluent, SASL_SSL) via `kafka-python` or equivalent client.  
+- Egress: REST iMessage API (see `openapi.json`) via `httpx/requests`.  
+- Core logic: LLM-driven agent (Anthropic or OpenAI) orchestrated with a small graph/router for intents.  
+- Persistence: SQLite (file-backed) with simple ORM/query helpers.  
+- Config: env-var driven; `.env` for local.
+
 ## Goals and Success
 - Match-ready profiles gathered with <3 cold-start messages.
 - Double-consent intros that feel personal (shared interest/vibe cited in the opener).
@@ -39,12 +47,14 @@ Persist `conversation_state`, `current_match_id`, `active_group_chat_id`, and ti
 ## Data Model (MVP)
 - User: phone_number (E.164, PK), name, status, profile {bio/vibe/interests/dealbreakers}, current_match_id, active_group_chat_id, last_seen_at, last_intro_at, consent flags.  
 - Match proposal: id, user_a, user_b, shared_interests, proposed_at, state (proposed/accepted/declined/expired).  
-- Storage: start with JSON or SQLite; abstract via `UserStore` so migration is trivial. Ensure atomic writes; backup files in `data/`.
+- Profile summaries: optional natural-language summaries for who they are and what they want (LLM-friendly).  
+- Storage: SQLite as default (file path in env). Keep access behind a store layer for easy migration; consider JSON export for backup/seeding.
 
 ## System Architecture
 - KafkaListener: SASL_SSL consumer for the configured topic; commits offsets after successful handling.  
 - EventRouter: inspects `chat_handles` to determine DM vs group; dispatches to private or group handler.  
-- Engine: onboarding script, matching engine, sidebar logic, stale detection.  
+- Engine: onboarding script, matching engine, sidebar logic, stale detection; delegates free-form replies to LLM nodes.  
+- LLM Layer: lightweight graph with nodes for intent classification, onboarding extraction, match pitch, and mentor/icebreakers.  
 - SeriesClient: REST wrapper to iMessage service (see API section) with retries, backoff, and error logging.  
 - Config: environment-driven; no secrets in code.  
 - Logging/metrics: structured logs with event type, chat_id, user phone; counters for ingress, sends, failures, retries.
@@ -86,23 +96,25 @@ Add optional `LOG_LEVEL`, `REQUEST_TIMEOUT_SEC`, `MAX_RETRIES`, `STALE_THRESHOLD
 
 ## Conversation Logic Details
 - Onboarding prompts use short, friendly tone; send typing indicator before multi-part replies for natural pacing.  
-- Proposal message references at least one shared interest or vibe tag.  
+- LLM extracts answers to the three prompts into profile fields and optional NL summaries; advance state when confident.  
+- Proposal message references at least one shared interest or vibe tag (LLM can phrase the pitch).  
 - Intro opener template: "Hi! [A], meet [B]. You both vibe on [shared]. [A] just [personal detail]. Have fun" (emoji optional).  
 - Stale intervention: after threshold, drop a single prompt then back off.  
-- Sidebar advice pulls last seen message in the group plus profile interests to suggest a question or callback.
+- Sidebar advice pulls last seen message in the group plus profile interests to suggest a question or callback (LLM-generated but short).
 
 ## Error Handling & Retries
 - Kafka: catch and log deserialization errors; skip/park poison messages after N failures.  
 - REST: retry idempotent sends with exponential backoff and jitter; surface non-2xx with context (chat_id, user).  
-- Persistence: fsync writes for JSON store; guard against partial writes with temp files and rename.  
+- Persistence: use SQLite transactions; on write errors, log and fall back to retry with backoff.  
 - Idempotency: de-dup incoming events by message id if provided; otherwise rely on offsets.
 
-## Implementation Plan (code layout in /src)
+## Code Layout (single PRD, targets for /src)
 - `main.py`: wire config, initialize Kafka consumer loop, and call `process_event`.  
 - `config.py`: load env, provide typed accessors.  
 - `client.py`: SeriesClient with send/create/typing/reaction helpers.  
-- `store.py`: UserStore abstraction (JSON/SQLite).  
+- `store.py`: SQLite-backed store abstraction (users, profiles, matches, state).  
 - `engine.py`: router, handlers, onboarding script, matching engine, sidebar + stale logic.  
+- `llm.py` or `agent/`: intent classifier, onboarding extraction, match pitch, mentor replies (graph-style orchestration).  
 - `utils.py`: phone normalization, logging helpers, simple templates.
 
 ## Testing Plan
