@@ -31,8 +31,6 @@ class TestRunner:
 
     def run_event(self, event: dict) -> RunResult:
         """Process single event, return structured result."""
-        self.api.reset()  # Clear API call history
-
         try:
             kafka_event = KafkaEvent.from_dict(event)
             data = kafka_event.data

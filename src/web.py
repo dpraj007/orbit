@@ -1009,7 +1009,9 @@ def _run_rest_live_poller(cfg: Config, log: logging.Logger, db: Database, api: S
                 phone = user.get("phone_number") if isinstance(user, dict) else user["phone_number"]
                 if not chat_id:
                     continue
-                msgs = api.get_messages(chat_id, limit=100)
+                msgs, was_404 = api.get_messages(chat_id, limit=100)
+                if was_404:
+                    continue  # Skip invalid chats
                 new_msgs = [m for m in msgs if m.get("id", 0) > last_ids.get(chat_id, 0)]
                 new_msgs.sort(key=lambda m: m.get("id", 0))
                 for m in new_msgs:

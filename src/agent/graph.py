@@ -4,7 +4,8 @@ import logging
 import time
 from typing import Any, Dict
 
-from langgraph.graph import END, StateGraph
+from langgraph.graph import END, START, StateGraph
+from langchain_core.messages import AIMessage, HumanMessage
 
 from ..api import SeriesAPI
 from ..db import Database
@@ -12,6 +13,34 @@ from .agentic import run_agent
 from .nodes import matching_node, mentor_node, onboarding_node
 from .router import classify_intent_node, load_context_node, route_to_node
 from .state import DatingState
+
+
+def generate_general_response(
+    status: str, profile_summary: str, context: str, message: str
+) -> str:
+    """Generate a dynamic general response using LLM."""
+    log = logging.getLogger("orbit.agent.general")
+    llm = get_llm()
+
+    prompt = GENERAL_RESPONSE_PROMPT.format(
+        status=status or "unknown",
+        profile_summary=profile_summary or "new user",
+        context=context or "general conversation",
+        message=message or "",
+    )
+
+    try:
+        result = llm.invoke(prompt)
+        response = result.content if hasattr(result, "content") else str(result)
+        return response.strip()
+    except Exception as exc:
+        log.error("Failed to generate general response: %s", exc)
+        # Minimal fallback
+        if status == "active":
+            return "Ready to find a match? Just say yes!"
+        elif status == "onboarding":
+            return "Let's continue getting to know you!"
+        return "I'm here to help with dating! What would you like to do?"
 
 
 def general_node(state: Dict[str, Any], db: Any) -> Dict[str, Any]:
@@ -153,8 +182,9 @@ def build_graph(db: Database, api: SeriesAPI) -> StateGraph:
     graph.add_node("general", general_wrapper)
     graph.add_node("save_and_respond", save_and_respond_wrapper)
 
-    # Set entry point
-    graph.set_entry_point("load_context")
+    # PROPER: Use START constant instead of set_entry_point()
+    # This is the recommended LangGraph v1.x pattern
+    graph.add_edge(START, "load_context")
 
     # Add edges
     graph.add_edge("load_context", "classify_intent")

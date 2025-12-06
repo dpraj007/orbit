@@ -169,6 +169,7 @@ def main() -> None:
         if cfg.ingress_mode == "api":
             log.info("Ingress mode=api (REST polling). Kafka disabled.")
             last_ids: Dict[int, int] = {}
+            invalid_chats: set[int] = set()  # Track chats that return 404
             sender_number = cfg.series_sender_number
             while should_run:
                 # 1: Poll DM chats for users
