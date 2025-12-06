@@ -6,6 +6,7 @@ import sys
 from typing import Any, Dict, Iterable, Tuple
 
 from .agent import build_graph
+from .agent.agentic import run_agent
 from .api import SeriesAPI
 from .config import Config
 from .db import Database
@@ -53,8 +54,44 @@ def process_event(event: Dict[str, Any], graph: Any, log: logging.Logger) -> Non
         }
 
         log.info("Processing message from %s in chat %d", phone, chat_id)
-        result = graph.invoke(initial_state)
-        log.debug("Graph execution completed: %s", result.get("response", "")[:50])
+        # Load context via graph load node
+        context = graph.nodes["load_context"](initial_state)  # type: ignore[index]
+        # Run agentic handler
+        agent_result = run_agent(text, context, db, api)
+
+        # Apply db_updates (group creation)
+        db_updates = agent_result.get("db_updates", [])
+        for update in db_updates:
+            if update.get("type") == "create_group":
+                user_a_id = update["user_a_id"]
+                user_b_id = update["user_b_id"]
+                user_a = db.users.get_by_id(user_a_id)
+                user_b = db.users.get_by_id(user_b_id)
+                if user_a and user_b:
+                    ua_phone = user_a["phone_number"]
+                    ub_phone = user_b["phone_number"]
+                    intro_message = (
+                        f"Hi! {update.get('user_a_name','You')}, meet {update.get('user_b_name','your match')}. "
+                        "You both matched! Have fun connecting."
+                    )
+                    try:
+                        result = api.create_group_chat([ua_phone, ub_phone], intro_message, display_name="Match")
+                        group_chat_id = result.get("chat", {}).get("id") or result.get("id")
+                        if group_chat_id:
+                            api.send_message(
+                                group_chat_id,
+                                "I'm here if you @Orbit for conversation tips. Otherwise, enjoy getting to know each other!",
+                            )
+                    except Exception as exc:
+                        log.error("Failed to create group chat: %s", exc)
+
+        response = agent_result.get("response", "")
+        if response and chat_id:
+            try:
+                api.send_with_typing(chat_id, response)
+                log.info("Sent response to chat %d", chat_id)
+            except Exception as exc:
+                log.error("Failed to send response: %s", exc)
 
     except Exception as exc:
         log.exception("Failed to process event: %s", exc)
