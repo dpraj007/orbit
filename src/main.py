@@ -59,6 +59,19 @@ def process_event(event: Dict[str, Any], graph: Any, log: logging.Logger) -> Non
         # Run agentic handler
         agent_result = run_agent(text, context, db, api)
 
+        # Simple dedupe using last_response in context
+        conv_state = context.get("conversation_state") or {}
+        ctx_raw = conv_state.get("context")
+        if ctx_raw:
+            try:
+                ctx_obj = json.loads(ctx_raw) if isinstance(ctx_raw, str) else ctx_raw
+            except Exception:
+                ctx_obj = {}
+        else:
+            ctx_obj = {}
+        last_resp = ctx_obj.get("last_response")
+        last_ts = ctx_obj.get("last_response_ts", 0)
+
         # Apply db_updates (group creation)
         db_updates = agent_result.get("db_updates", [])
         for update in db_updates:
@@ -85,13 +98,31 @@ def process_event(event: Dict[str, Any], graph: Any, log: logging.Logger) -> Non
                     except Exception as exc:
                         log.error("Failed to create group chat: %s", exc)
 
-        response = agent_result.get("response", "")
-        if response and chat_id:
+        # Mark connected if provided by agent
+        for uid in agent_result.get("set_connected_ids", []):
             try:
-                api.send_with_typing(chat_id, response)
-                log.info("Sent response to chat %d", chat_id)
-            except Exception as exc:
-                log.error("Failed to send response: %s", exc)
+                db.conversation_state.upsert(uid, current_node="connected", match_in_progress=None)
+            except Exception:
+                pass
+
+        response = agent_result.get("response", "")
+        # Dedupe: skip if same response was just sent
+        import time as _time
+        if response and chat_id:
+            if last_resp == response and (_time.time() - last_ts) < 5:
+                log.info("Skipping duplicate response to chat %d", chat_id)
+            else:
+                try:
+                    api.send_with_typing(chat_id, response)
+                    log.info("Sent response to chat %d", chat_id)
+                except Exception as exc:
+                    log.error("Failed to send response: %s", exc)
+                # update context cache
+                ctx_obj.update({"last_response": response, "last_response_ts": _time.time()})
+                try:
+                    db.conversation_state.upsert(context.get("user_id"), context=json.dumps(ctx_obj))
+                except Exception:
+                    pass
 
     except Exception as exc:
         log.exception("Failed to process event: %s", exc)

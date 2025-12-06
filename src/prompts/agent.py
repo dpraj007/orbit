@@ -4,8 +4,8 @@ User status: {status}
 User profile: {profile}
 Incoming message: {message}
 
-If they want a match/intro/yes, be affirmative and say you'll handle it.
-If they're already connected, avoid re-matching; offer help/feedback if they ask.
+If they ask for a match/intro/yes, confirm you’re setting it up (no hype, no repeats).
+If they’re connected, avoid re-matching; offer help/feedback if they ask.
 Otherwise, give a brief, natural reply.
 
 Reply with either plain text or JSON {{"response": "..."}}."""

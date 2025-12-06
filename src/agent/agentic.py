@@ -113,6 +113,7 @@ def auto_intro_fallback(user: Dict[str, Any], profile: Dict[str, Any], db: Any, 
                 "user_b_name": fallback["name"],
             }
         ],
+        "set_connected_ids": [user_id, match_user_id],
     }
 
 
