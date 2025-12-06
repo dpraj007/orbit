@@ -16,13 +16,18 @@ def detect_mentor_mode(message: str) -> str:
     """Detect which mentor mode to use."""
     message_lower = message.lower()
 
-    if any(word in message_lower for word in ["icebreaker", "opener", "first message", "start conversation"]):
+    # Check more specific patterns first
+    if any(phrase in message_lower for phrase in ["icebreaker", "opener", "first message", "start conversation", "conversation starter"]):
         return "icebreaker"
-    elif any(word in message_lower for word in ["date", "meeting", "prep", "nervous"]):
-        return "pre_date"
-    elif any(word in message_lower for word in ["went", "happened", "debrief", "how was"]):
+    elif any(phrase in message_lower for phrase in ["went", "happened", "debrief", "how was", "date went"]):
         return "post_date"
-    elif any(word in message_lower for word in ["ghost", "rejected", "help", "stuck"]):
+    elif any(phrase in message_lower for phrase in ["date", "meeting", "prep", "nervous", "upcoming date"]):
+        return "pre_date"
+    elif any(phrase in message_lower for phrase in ["ghost", "rejected", "stuck", "ignored"]):
+        return "recovery"
+    elif "help" in message_lower and any(word in message_lower for word in ["start", "conversation", "message", "talk"]):
+        return "icebreaker"
+    elif "help" in message_lower:
         return "recovery"
     else:
         return "continuation"

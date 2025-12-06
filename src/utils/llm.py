@@ -1,9 +1,17 @@
 """LLM client utilities."""
 import os
+from pathlib import Path
 from typing import Optional
 
 from langchain_openai import ChatOpenAI
 
+try:
+    from dotenv import load_dotenv
+    env_path = Path(".env")
+    if env_path.exists():
+        load_dotenv(env_path)
+except ImportError:
+    pass
 
 _llm_instance: Optional[ChatOpenAI] = None
 

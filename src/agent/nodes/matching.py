@@ -16,6 +16,12 @@ def calculate_bilateral_score(
 
     llm = get_llm()
 
+    # Initialize scores with defaults
+    score_a_to_b = 50.0
+    score_b_to_a = 50.0
+    reason_a = "Unable to calculate"
+    reason_b = "Unable to calculate"
+
     # Score A -> B
     prompt_a_to_b = BILATERAL_SCORING_PROMPT.format(
         profile_a=profile_a.get("profile_summary", "No summary"),
@@ -28,9 +34,14 @@ def calculate_bilateral_score(
         result_a = llm.invoke(prompt_a_to_b)
         content_a = result_a.content if hasattr(result_a, "content") else str(result_a)
         # Extract JSON from content
-        score_data_a = json.loads(content_a)
-        score_a_to_b = float(score_data_a.get("score", 50))
-        reason_a = score_data_a.get("reason", "")
+        try:
+            score_data_a = json.loads(content_a)
+            score_a_to_b = float(score_data_a.get("score", 50))
+            reason_a = score_data_a.get("reason", "")
+        except (json.JSONDecodeError, ValueError, KeyError) as json_exc:
+            log.warning("JSON parsing failed for A->B: %s", json_exc)
+            score_a_to_b = 50.0
+            reason_a = "Unable to calculate"
     except Exception as exc:
         log.warning("Score A->B failed: %s", exc)
         score_a_to_b = 50.0
@@ -47,9 +58,14 @@ def calculate_bilateral_score(
     try:
         result_b = llm.invoke(prompt_b_to_a)
         content_b = result_b.content if hasattr(result_b, "content") else str(result_b)
-        score_data_b = json.loads(content_b)
-        score_b_to_a = float(score_data_b.get("score", 50))
-        reason_b = score_data_b.get("reason", "")
+        try:
+            score_data_b = json.loads(content_b)
+            score_b_to_a = float(score_data_b.get("score", 50))
+            reason_b = score_data_b.get("reason", "")
+        except (json.JSONDecodeError, ValueError, KeyError) as json_exc:
+            log.warning("JSON parsing failed for B->A: %s", json_exc)
+            score_b_to_a = 50.0
+            reason_b = "Unable to calculate"
     except Exception as exc:
         log.warning("Score B->A failed: %s", exc)
         score_b_to_a = 50.0
@@ -224,7 +240,8 @@ def matching_node(state: Dict[str, Any], db: Any) -> Dict[str, Any]:
 
     # Notify the match candidate too
     match_user = db.users.get_by_id(match_user_id)
-    if match_user and match_user.get("chat_id"):
+    match_user_dict = dict(match_user) if match_user else None
+    if match_user_dict and match_user_dict.get("chat_id"):
         match_pitch_for_them = generate_match_pitch(match_profile_dict, profile, score, reason)
         match_response = f"{match_pitch_for_them}\n\nInterested? Reply yes or no."
 
@@ -238,7 +255,7 @@ def matching_node(state: Dict[str, Any], db: Any) -> Dict[str, Any]:
             "db_updates": [
                 {
                     "type": "notify_match",
-                    "chat_id": match_user["chat_id"],
+                    "chat_id": match_user_dict["chat_id"],
                     "message": match_response,
                 }
             ],

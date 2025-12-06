@@ -29,11 +29,15 @@ def process_event(event: Dict[str, Any], graph: Any, log: logging.Logger) -> Non
             log.warning("Skipping event missing phone/chat_id: %s", event)
             return
 
-        # Skip group messages for now (unless @orbit is mentioned)
+        # Log all messages for debugging
         is_group = len(chat_handles) > 2
-        if is_group and "@orbit" not in text.lower():
-            log.debug("Skipping group message without @orbit mention")
-            return
+        log.info("📝 Message: '%s' from %s (group=%s, handles=%d)", 
+                 text[:50] if text else "(empty)", phone, is_group, len(chat_handles))
+        
+        # Process all messages for now (skip group filter for testing)
+        # if is_group and "@orbit" not in text.lower():
+        #     log.debug("Skipping group message without @orbit mention")
+        #     return
 
         # Build initial state
         initial_state = {
@@ -103,6 +107,7 @@ def main() -> None:
                     break
 
                 event: Dict[str, Any] = message.value
+                log.info("📨 Received Kafka event: %s", str(event)[:200])
                 process_event(event, graph, log)
 
     finally:

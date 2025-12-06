@@ -4,13 +4,20 @@ from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, Field
 
 
+class ChatHandle(BaseModel):
+    """Chat participant handle."""
+    display_name: Optional[str] = None
+    identifier: Optional[str] = None
+    is_me: Optional[bool] = False
+
+
 class KafkaEventData(BaseModel):
     """Data payload from Kafka event."""
 
     text: Optional[str] = None
     from_phone: Optional[str] = None
     chat_id: Optional[int] = None
-    chat_handles: Optional[List[str]] = Field(default_factory=list)
+    chat_handles: Optional[List[ChatHandle]] = Field(default_factory=list)
     message_id: Optional[int] = None
     attachments: Optional[List[Dict[str, Any]]] = Field(default_factory=list)
 
