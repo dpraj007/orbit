@@ -296,6 +296,11 @@ class ConversationStateQueries:
         )
         return cur.fetchone()
 
+    def get_all(self) -> List[sqlite3.Row]:
+        """Get all conversation_state rows."""
+        cur = self.conn.execute("SELECT * FROM conversation_state")
+        return cur.fetchall()
+
     def upsert(
         self,
         user_id: int,

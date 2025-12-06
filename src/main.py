@@ -1,4 +1,5 @@
 """Main entry point for Orbit dating agent."""
+import json
 import logging
 import time
 import signal
@@ -7,6 +8,7 @@ from typing import Any, Dict, Iterable, Tuple
 
 from .agent import build_graph
 from .agent.agentic import run_agent
+from .agent.router import load_context_node
 from .api import SeriesAPI
 from .config import Config
 from .db import Database
@@ -14,7 +16,7 @@ from .kafka import KafkaEvent, build_consumer
 from .utils import setup_logger
 
 
-def process_event(event: Dict[str, Any], graph: Any, log: logging.Logger) -> None:
+def process_event(event: Dict[str, Any], db: Database, api: SeriesAPI, log: logging.Logger) -> None:
     """Process a Kafka event through the LangGraph."""
     try:
         if "event_type" in event:
@@ -37,14 +39,19 @@ def process_event(event: Dict[str, Any], graph: Any, log: logging.Logger) -> Non
             log.warning("Skipping event missing phone/chat_id: %s", event)
             return
 
-        is_group = len(chat_handles) > 2
-        log.info("📝 Message: '%s' from %s (group=%s, handles=%d)", 
-                 text[:50] if text else "(empty)", phone, is_group, len(chat_handles))
-        
-        # Process all messages for now (skip group filter for testing)
-        # if is_group and "@orbit" not in text.lower():
-        #     log.debug("Skipping group message without @orbit mention")
-        #     return
+        is_group = bool(event.get("data", {}).get("is_group")) or len(chat_handles) > 2
+        log.info(
+            "📝 Message: '%s' from %s (group=%s, handles=%d)",
+            text[:50] if text else "(empty)",
+            phone,
+            is_group,
+            len(chat_handles),
+        )
+
+        # In group chats, only react when explicitly mentioned to avoid spam
+        if is_group and "@orbit" not in text.lower():
+            log.debug("Skipping group message without @orbit mention")
+            return
 
         initial_state = {
             "phone_number": phone,
@@ -54,8 +61,8 @@ def process_event(event: Dict[str, Any], graph: Any, log: logging.Logger) -> Non
         }
 
         log.info("Processing message from %s in chat %d", phone, chat_id)
-        # Load context via graph load node
-        context = graph.nodes["load_context"](initial_state)  # type: ignore[index]
+        # Load context directly via router helper
+        context = load_context_node(initial_state, db)
         # Run agentic handler
         agent_result = run_agent(text, context, db, api)
 
@@ -95,6 +102,19 @@ def process_event(event: Dict[str, Any], graph: Any, log: logging.Logger) -> Non
                                 group_chat_id,
                                 "I'm here if you @Orbit for conversation tips. Otherwise, enjoy getting to know each other!",
                             )
+                            # Store group_chat_id in conversation_state context for both users
+                            for uid in (user_a_id, user_b_id):
+                                state_row = db.conversation_state.get_by_user_id(uid)
+                                ctx_raw = state_row["context"] if state_row and state_row["context"] else None
+                                if ctx_raw:
+                                    try:
+                                        ctx_obj = json.loads(ctx_raw)
+                                    except Exception:
+                                        ctx_obj = {}
+                                else:
+                                    ctx_obj = {}
+                                ctx_obj["group_chat_id"] = group_chat_id
+                                db.conversation_state.upsert(uid, current_node="connected", match_in_progress=None, context=ctx_obj)
                     except Exception as exc:
                         log.error("Failed to create group chat: %s", exc)
 
@@ -229,12 +249,12 @@ def main() -> None:
             last_ids: Dict[int, int] = {}
             sender_number = cfg.series_sender_number
             while should_run:
+                # 1: Poll DM chats for users
                 users = db.users.get_all()
                 for user in users:
                     chat_id = user["chat_id"]
                     if not chat_id:
                         continue
-                    # Fetch recent messages; with pruning, this contains the newest
                     msgs = api.get_messages(chat_id, limit=100)
                     if chat_id not in last_ids:
                         last_ids[chat_id] = max((m.get("id", 0) for m in msgs), default=0)
@@ -250,9 +270,49 @@ def main() -> None:
                                 "from_phone": m.get("sent_from"),
                                 "text": m.get("text", ""),
                                 "chat_handles": m.get("chat_handles") or [],
+                                "is_group": False,
                             }
                         }
-                        process_event(event, graph, log)
+                        process_event(event, db, api, log)
+
+                # 2: Poll group chats associated with conversation_state
+                try:
+                    states = db.conversation_state.get_all()
+                except Exception:
+                    states = []
+                group_ids = set()
+                for row in states:
+                    ctx_raw = row["context"]
+                    if not ctx_raw:
+                        continue
+                    try:
+                        ctx_obj = json.loads(ctx_raw)
+                        if not isinstance(ctx_obj, dict):
+                            ctx_obj = {}
+                    except Exception:
+                        continue
+                    gid = ctx_obj.get("group_chat_id")
+                    if isinstance(gid, int):
+                        group_ids.add(gid)
+
+                for gid in group_ids:
+                    msgs = api.get_messages(gid, limit=100)
+                    if gid not in last_ids:
+                        last_ids[gid] = max((m.get("id", 0) for m in msgs), default=0)
+                        continue
+                    new_msgs = [m for m in msgs if m.get("id", 0) > last_ids[gid]]
+                    for m in sorted(new_msgs, key=lambda x: x.get("id", 0)):
+                        last_ids[gid] = max(last_ids[gid], m.get("id", 0))
+                        event = {
+                            "data": {
+                                "chat_id": gid,
+                                "from_phone": m.get("sent_from"),
+                                "text": m.get("text", ""),
+                                "chat_handles": m.get("chat_handles") or [],
+                                "is_group": True,
+                            }
+                        }
+                        process_event(event, db, api, log)
                 time.sleep(cfg.poll_interval_sec)
         else:
             while should_run:
@@ -260,7 +320,7 @@ def main() -> None:
                     if not should_run:
                         break
                     event: Dict[str, Any] = message.value
-                    process_event(event, graph, log)
+                    process_event(event, db, api, log)
     finally:
         log.info("Closing connections...")
         if consumer:

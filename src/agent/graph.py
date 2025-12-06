@@ -1,4 +1,5 @@
 """LangGraph graph definition for dating agent."""
+import json
 import logging
 import time
 from typing import Any, Dict
@@ -7,26 +8,24 @@ from langgraph.graph import END, StateGraph
 
 from ..api import SeriesAPI
 from ..db import Database
+from .agentic import run_agent
 from .nodes import matching_node, mentor_node, onboarding_node
 from .router import classify_intent_node, load_context_node, route_to_node
 from .state import DatingState
 
 
 def general_node(state: Dict[str, Any], db: Any) -> Dict[str, Any]:
-    """Handle general/fallback messages."""
+    """Handle general/fallback messages via the agentic handler."""
     log = logging.getLogger("orbit.agent.general")
 
-    user = state.get("user", {})
-    status = user.get("status", "onboarding") if user else "onboarding"
+    message = state.get("message", "")
+    result = run_agent(message, state, db, api=None)  # type: ignore[arg-type]
 
-    if status == "active":
-        response = "Want me to find you a match? Just say yes!"
-    elif status == "onboarding":
-        response = "Let's finish getting to know you first!"
-    else:
-        response = "I'm here to help with dating! Say 'find match' to start or 'help' for advice."
+    response = result.get("response", "")
+    db_updates = result.get("db_updates", [])
 
-    return {"response": response, "next_node": "save_and_respond"}
+    log.info("General node using agentic response: %s", response[:80] if response else "(empty)")
+    return {"response": response, "next_node": "save_and_respond", "db_updates": db_updates}
 
 
 def save_and_respond_node(state: Dict[str, Any], db: Any, api: SeriesAPI) -> Dict[str, Any]:
@@ -40,18 +39,23 @@ def save_and_respond_node(state: Dict[str, Any], db: Any, api: SeriesAPI) -> Dic
     db_updates = state.get("db_updates", [])
 
     # Simple dedupe: if we just sent the same response to this user within a few seconds, skip
+    context_raw = conv_state.get("context")
     if user_id and response:
-        context = conv_state.get("context")
-        if context and isinstance(context, dict):
-            last_resp = context.get("last_response")
-            last_ts = context.get("last_response_ts", 0)
-            if last_resp == response and (time.time() - last_ts) < 5:
-                log.info("Skipping duplicate response for user %s", user_id)
-                response = ""
+        if context_raw:
+            try:
+                ctx_obj = json.loads(context_raw) if isinstance(context_raw, str) else context_raw
+            except Exception:
+                ctx_obj = {}
+        else:
+            ctx_obj = {}
+        last_resp = ctx_obj.get("last_response")
+        last_ts = ctx_obj.get("last_response_ts", 0)
+        if last_resp == response and (time.time() - last_ts) < 5:
+            log.info("Skipping duplicate response for user %s", user_id)
+            response = ""
         # Update context with last response
-        new_ctx = context.copy() if context and isinstance(context, dict) else {}
-        new_ctx.update({"last_response": response, "last_response_ts": time.time()})
-        db.conversation_state.upsert(user_id, context=new_ctx)
+        ctx_obj.update({"last_response": response, "last_response_ts": time.time()})
+        db.conversation_state.upsert(user_id, context=json.dumps(ctx_obj))
 
     # Process database updates
     for update in db_updates:
