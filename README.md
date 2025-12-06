@@ -9,6 +9,9 @@ Quickstart: `./spool.sh` (creates `.venv`, installs deps, loads `.env`, runs).
 2) `pip install -r requirements.txt` (or let `./spool.sh` handle it)  
 3) Run consumer: `python -m src.main` (or `INGRESS_MODE=api ./spool.sh` for REST polling)
 
+## Monitor
+Lightweight read-only dashboard: `python -m src.monitor` (defaults to http://localhost:8000). Shows users, matches, chats/messages (if SERIES creds provided).
+
 ## Notes
 - LLM: defaults to OpenRouter `x-ai/grok-4.1-fast`.  
 - Persistence: SQLite at `DATABASE_PATH` (default `./orbit.db`).  
