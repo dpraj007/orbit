@@ -7,11 +7,48 @@ set -euo pipefail
 BASE_URL="${SERIES_BASE_URL:?set SERIES_BASE_URL}"
 API_KEY="${SERIES_API_KEY:?set SERIES_API_KEY}"
 
-# Chats to prune (space-separated). Defaults: Leon/Dhairyasheel threads.
+# Chats to prune (space-separated).
+# Priority:
+# 1) If CHAT_IDS is set, use that.
+# 2) Else, if DATABASE_PATH (or orbit.db) exists, derive from DB:
+#    - all users.chat_id
+#    - any group_chat_id in conversation_state.context
+# 3) Else, fall back to static demo IDs.
 if [[ -n "${CHAT_IDS:-}" ]]; then
   read -r -a CHATS <<<"${CHAT_IDS}"
 else
-  CHATS=("1701689" "1701997")
+  DB_PATH="${DATABASE_PATH:-orbit.db}"
+  if [[ -f "${DB_PATH}" ]]; then
+    echo "[pruner] deriving chat ids from ${DB_PATH}"
+    CHAT_IDS_STR=$(python3 - <<PY
+import json, sqlite3, os
+db = os.environ.get("DB_PATH", "${DB_PATH}")
+conn = sqlite3.connect(db)
+conn.row_factory = sqlite3.Row
+c = conn.cursor()
+ids = set()
+for row in c.execute("SELECT chat_id FROM users WHERE chat_id IS NOT NULL"):
+    ids.add(row["chat_id"])
+for row in c.execute("SELECT context FROM conversation_state WHERE context IS NOT NULL"):
+    ctx = row["context"]
+    if not ctx:
+        continue
+    try:
+        obj = json.loads(ctx)
+    except Exception:
+        continue
+    gid = obj.get("group_chat_id")
+    if isinstance(gid, int):
+        ids.add(gid)
+print(" ".join(str(x) for x in sorted(ids)))
+PY
+)
+    read -r -a CHATS <<<"${CHAT_IDS_STR:-}"
+  fi
+  if [[ ${#CHATS[@]} -eq 0 ]]; then
+    # Fallback demo IDs if DB derived set is empty
+    CHATS=("1701689" "1701723")
+  fi
 fi
 
 # Tunables

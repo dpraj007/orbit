@@ -1,11 +1,5 @@
-"""LangGraph graph definition for dating agent.
-
-PROPER IMPLEMENTATION using LangChain-LangGraph patterns:
-- Uses START constant for entry point (not set_entry_point)
-- Uses proper message types for LLM communication
-- Graph nodes return messages that accumulate via add_messages reducer
-- Uses LLM to generate dynamic, contextual responses instead of hardcoded strings
-"""
+"""LangGraph graph definition for dating agent."""
+import json
 import logging
 import time
 from typing import Any, Dict
@@ -15,8 +9,7 @@ from langchain_core.messages import AIMessage, HumanMessage
 
 from ..api import SeriesAPI
 from ..db import Database
-from ..prompts import GENERAL_RESPONSE_PROMPT
-from ..utils.llm import get_llm
+from .agentic import run_agent
 from .nodes import matching_node, mentor_node, onboarding_node
 from .router import classify_intent_node, load_context_node, route_to_node
 from .state import DatingState
@@ -51,37 +44,17 @@ def generate_general_response(
 
 
 def general_node(state: Dict[str, Any], db: Any) -> Dict[str, Any]:
-    """Handle general/fallback messages.
-    
-    PROPER: Returns AIMessage for response (will be added to messages via add_messages).
-    Uses LLM to generate dynamic, contextual responses.
-    """
+    """Handle general/fallback messages via the agentic handler."""
     log = logging.getLogger("orbit.agent.general")
 
-    user = state.get("user", {})
-    profile = state.get("profile", {})
-    conv_state = state.get("conversation_state", {})
-    status = user.get("status", "onboarding") if user else "onboarding"
-    
-    # Extract message from state
-    message = ""
-    messages = state.get("messages", [])
-    if messages:
-        for msg in reversed(messages):
-            if isinstance(msg, HumanMessage):
-                message = msg.content
-                break
-    if not message:
-        message = state.get("message", "")
+    message = state.get("message", "")
+    result = run_agent(message, state, db, api=None)  # type: ignore[arg-type]
 
-    profile_summary = profile.get("profile_summary", "") if profile else ""
-    context = conv_state.get("current_node", "general") if conv_state else "general"
+    response = result.get("response", "")
+    db_updates = result.get("db_updates", [])
 
-    # Generate dynamic response using LLM
-    response = generate_general_response(status, profile_summary, context, message)
-
-    # PROPER: Return both messages (for new pattern) and response (for legacy)
-    return {"messages": [AIMessage(content=response)], "response": response, "next_node": "save_and_respond"}
+    log.info("General node using agentic response: %s", response[:80] if response else "(empty)")
+    return {"response": response, "next_node": "save_and_respond", "db_updates": db_updates}
 
 
 def save_and_respond_node(state: Dict[str, Any], db: Any, api: SeriesAPI) -> Dict[str, Any]:
@@ -95,18 +68,23 @@ def save_and_respond_node(state: Dict[str, Any], db: Any, api: SeriesAPI) -> Dic
     db_updates = state.get("db_updates", [])
 
     # Simple dedupe: if we just sent the same response to this user within a few seconds, skip
+    context_raw = conv_state.get("context")
     if user_id and response:
-        context = conv_state.get("context")
-        if context and isinstance(context, dict):
-            last_resp = context.get("last_response")
-            last_ts = context.get("last_response_ts", 0)
-            if last_resp == response and (time.time() - last_ts) < 5:
-                log.info("Skipping duplicate response for user %s", user_id)
-                response = ""
+        if context_raw:
+            try:
+                ctx_obj = json.loads(context_raw) if isinstance(context_raw, str) else context_raw
+            except Exception:
+                ctx_obj = {}
+        else:
+            ctx_obj = {}
+        last_resp = ctx_obj.get("last_response")
+        last_ts = ctx_obj.get("last_response_ts", 0)
+        if last_resp == response and (time.time() - last_ts) < 5:
+            log.info("Skipping duplicate response for user %s", user_id)
+            response = ""
         # Update context with last response
-        new_ctx = context.copy() if context and isinstance(context, dict) else {}
-        new_ctx.update({"last_response": response, "last_response_ts": time.time()})
-        db.conversation_state.upsert(user_id, context=new_ctx)
+        ctx_obj.update({"last_response": response, "last_response_ts": time.time()})
+        db.conversation_state.upsert(user_id, context=json.dumps(ctx_obj))
 
     # Process database updates
     for update in db_updates:
