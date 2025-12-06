@@ -1,8 +1,12 @@
+"""Utility package for shared helpers."""
+
 import json
 import logging
 import time
 from datetime import datetime, timezone
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Iterable, List, Optional
+
+from .llm import get_llm, reset_llm  # noqa: F401
 
 
 def utc_now_iso() -> str:
