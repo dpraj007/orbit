@@ -3,7 +3,7 @@
 Series dating wingman that consumes Kafka events, runs an LLM-driven agent, and replies via the iMessage REST API.
 
 ## Setup
-1) Create `.env` from `.env.example` and fill secrets (Kafka, Series API, OpenRouter key).  
+1) Create `.env` from `.env.example` and fill secrets (Kafka, Series API, OpenRouter key). The sample uses `https://series-hackathon-service-202642739529.us-east1.run.app` for `SERIES_BASE_URL`; replace if needed.  
 2) `pip install -r requirements.txt`  
 3) Run consumer: `python -m src.main`
 
