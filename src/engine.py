@@ -1,11 +1,11 @@
 import json
 import logging
-from typing import Dict, Iterable, Optional
+from typing import Any, Dict, Iterable, Optional
 
 from .client import SeriesClient
 from .llm import WingmanLLM
 from .store import UserStore
-from .utils import shared_interests
+from .utils import safe_json, shared_interests
 
 
 ONBOARDING_QUESTIONS = [
@@ -17,14 +17,13 @@ ONBOARDING_QUESTIONS = [
 
 def process_event(event: Dict, client: SeriesClient, store: UserStore, llm: WingmanLLM) -> None:
     log = logging.getLogger("orbit.engine")
-    data = event.get("data", {})
-    text = (data.get("text") or "").strip()
-    from_phone = data.get("from_phone")
-    chat_id = data.get("chat_id")
-    chat_handles = data.get("chat_handles") or []
-    if not from_phone or chat_id is None:
-        log.warning("Skipping event missing phone/chat_id: %s", event)
+    parsed = _normalize_event(event, log)
+    if not parsed:
         return
+    text = parsed["text"]
+    from_phone = parsed["from_phone"]
+    chat_id = parsed["chat_id"]
+    chat_handles = parsed["chat_handles"]
 
     is_group = len(chat_handles) > 2
     user = store.get_user(from_phone)
@@ -61,6 +60,86 @@ def process_event(event: Dict, client: SeriesClient, store: UserStore, llm: Wing
 
     # Default private DM behavior
     client.send_message(chat_id, "Got you. Want me to find someone who vibes with you? Reply yes/no.")
+
+
+def _normalize_event(event: Dict[str, Any], log: logging.Logger) -> Optional[Dict[str, Any]]:
+    """
+    Accepts a few different payload envelopes and distills the fields we need.
+
+    Supports:
+    - {"data": {...}} (canonical)
+    - {"data": "<json>"} (stringified payloads)
+    - {"data": {"message": {...}, "chat": {...}}} (API-shaped message objects)
+    """
+    raw_data: Any = event.get("data") or event.get("payload") or {}
+
+    if isinstance(raw_data, str):
+        try:
+            raw_data = json.loads(raw_data)
+        except Exception:
+            log.warning("Skipping event with non-JSON data: %s", raw_data)
+            return None
+
+    if not isinstance(raw_data, dict):
+        log.warning("Skipping event with unexpected data type: %s", type(raw_data))
+        return None
+
+    message_block = raw_data.get("message")
+    message_block = message_block if isinstance(message_block, dict) else {}
+    chat_message_block = raw_data.get("chat_message")
+    chat_message_block = chat_message_block if isinstance(chat_message_block, dict) else {}
+    chat_block = raw_data.get("chat")
+    chat_block = chat_block if isinstance(chat_block, dict) else {}
+
+    def _first_non_empty(*candidates: Any) -> Optional[Any]:
+        for cand in candidates:
+            if isinstance(cand, str) and cand.strip():
+                return cand
+            if cand not in (None, "", []):
+                return cand
+        return None
+
+    def _normalize_handles(handles: Any) -> list[str]:
+        normalized: list[str] = []
+        for handle in handles or []:
+            if isinstance(handle, dict):
+                phone = handle.get("phone_number") or handle.get("handle") or handle.get("id") or handle.get("value")
+                if phone:
+                    normalized.append(str(phone))
+            elif handle:
+                normalized.append(str(handle))
+        return normalized
+
+    text = (_first_non_empty(raw_data.get("text"), message_block.get("text"), chat_message_block.get("text")) or "").strip()
+    from_phone = _first_non_empty(
+        raw_data.get("from_phone"),
+        message_block.get("from_phone"),
+        chat_message_block.get("from_phone"),
+        raw_data.get("sent_from"),
+        message_block.get("sent_from"),
+        chat_message_block.get("sent_from"),
+    )
+    chat_id = _first_non_empty(
+        raw_data.get("chat_id"),
+        message_block.get("chat_id"),
+        chat_message_block.get("chat_id"),
+        chat_block.get("id"),
+        (message_block.get("chat") or {}).get("id") if isinstance(message_block.get("chat"), dict) else None,
+    )
+    chat_handles = _normalize_handles(
+        _first_non_empty(
+            raw_data.get("chat_handles"),
+            chat_block.get("chat_handles"),
+            (message_block.get("chat") or {}).get("chat_handles") if isinstance(message_block.get("chat"), dict) else None,
+        )
+        or [],
+    )
+
+    if not from_phone or chat_id is None:
+        log.warning("Skipping event missing phone/chat_id: %s", safe_json(event))
+        return None
+
+    return {"text": text, "from_phone": from_phone, "chat_id": chat_id, "chat_handles": chat_handles}
 
 
 def handle_onboarding(user_row, text: str, chat_id: int, store: UserStore, client: SeriesClient, llm: WingmanLLM) -> None:

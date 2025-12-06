@@ -18,7 +18,9 @@ class SeriesClient:
         self.sender_number = sender_number
         self.log = logging.getLogger("orbit.series")
 
-    def _request(self, method: str, path: str, json: Optional[dict] = None) -> Dict[str, Any]:
+    def _request(
+        self, method: str, path: str, json: Optional[dict] = None, params: Optional[dict] = None
+    ) -> Dict[str, Any]:
         url = f"{self.base_url}{path}"
         headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
         last_exc: Optional[Exception] = None
@@ -28,6 +30,7 @@ class SeriesClient:
                     method,
                     url,
                     headers=headers,
+                    params=params,
                     json=json,
                     timeout=self.timeout,
                 )
@@ -59,6 +62,20 @@ class SeriesClient:
         if send_from_number:
             payload["send_from"] = send_from_number
         return self._request("POST", "/api/chats", json=payload)
+
+    def list_chats(self, phone_number: Optional[str] = None, page: int = 1, per_page: int = 50) -> Iterable[Dict[str, Any]]:
+        params: Dict[str, Any] = {"page": page, "per_page": per_page}
+        if phone_number:
+            params["phone_number"] = phone_number
+        resp = self._request("GET", "/api/chats", params=params)
+        data = resp.get("data")
+        return data if isinstance(data, list) else []
+
+    def list_chat_messages(self, chat_id: int, page: int = 1, per_page: int = 50) -> Iterable[Dict[str, Any]]:
+        params = {"page": page, "per_page": per_page}
+        resp = self._request("GET", f"/api/chats/{chat_id}/chat_messages", params=params)
+        data = resp.get("data")
+        return data if isinstance(data, list) else []
 
     def set_typing(self, chat_id: int) -> None:
         self._request("POST", f"/api/chats/{chat_id}/start_typing")
