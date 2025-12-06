@@ -102,11 +102,15 @@ def update_profile_summary(
     if new_info.get("interests"):
         parts.append(f"Interests: {new_info['interests']}.")
 
-    summary = " ".join(parts) if parts else current_summary
+    summary = " ".join(parts) if parts else (current_summary or "")
 
     # If we have current summary, merge it
-    if current_summary and summary != current_summary:
+    if current_summary and summary and summary != current_summary:
         summary = f"{current_summary} {summary}"
+
+    # Ensure we have a string, not None
+    if not summary:
+        summary = ""
 
     return summary[:500]  # Keep it reasonable length
 

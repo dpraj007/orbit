@@ -37,9 +37,13 @@ def process_event(event: Dict[str, Any], graph: Any, log: logging.Logger) -> Non
             return
 
         is_group = len(chat_handles) > 2
-        if is_group and "@orbit" not in text.lower():
-            log.debug("Skipping group message without @orbit mention")
-            return
+        log.info("📝 Message: '%s' from %s (group=%s, handles=%d)", 
+                 text[:50] if text else "(empty)", phone, is_group, len(chat_handles))
+        
+        # Process all messages for now (skip group filter for testing)
+        # if is_group and "@orbit" not in text.lower():
+        #     log.debug("Skipping group message without @orbit mention")
+        #     return
 
         initial_state = {
             "phone_number": phone,
