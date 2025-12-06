@@ -248,6 +248,14 @@ class UserStore:
             return []
         return parse_csv(user["profile_interests"])
 
+    def ensure_user(self, phone: str, name: Optional[str] = None, status: str = "BROWSING") -> None:
+        """
+        Insert a user if they do not already exist, leaving existing rows untouched.
+        """
+        if self.get_user(phone):
+            return
+        self.upsert_user(phone, status=status, name=name)
+
     def get_last_message_id(self, chat_id: int) -> Optional[int]:
         cur = self.conn.execute("SELECT last_message_id FROM chat_offsets WHERE chat_id=?", (chat_id,))
         row = cur.fetchone()

@@ -68,6 +68,19 @@ class TestUserStore:
         user = store.get_user("+15551234567")
         assert user["last_dm_chat_id"] == 999
 
+    def test_ensure_user_inserts_and_does_not_override(self, store):
+        store.ensure_user("+15551112222", name="First", status="BROWSING")
+        user = store.get_user("+15551112222")
+        assert user is not None
+        assert user["name"] == "First"
+        assert user["status"] == "BROWSING"
+
+        # Existing row should remain unchanged
+        store.ensure_user("+15551112222", name="Second", status="IN_ORBIT")
+        user = store.get_user("+15551112222")
+        assert user["name"] == "First"
+        assert user["status"] == "BROWSING"
+
     def test_chat_offsets(self, store):
         assert store.get_last_message_id(123) is None
         store.set_last_message_id(123, 10)

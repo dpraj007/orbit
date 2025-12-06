@@ -116,6 +116,9 @@ def main() -> None:
     cfg = Config.from_env()
     log = setup_logger(cfg.log_level)
     store = UserStore(cfg.db_path)
+    # Seed primary testers if not already present (no override of existing data).
+    store.ensure_user("+16479165156", name="Leon", status="BROWSING")
+    store.ensure_user("+19298776648", name="Dhairyasheel", status="BROWSING")
     series_client = SeriesClient(
         cfg.series_base_url,
         cfg.series_api_key,
